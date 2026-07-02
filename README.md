@@ -68,13 +68,15 @@ v1(Dhandho_RSI30, RSI<30 → 단도 게이트 → 신호)의 검증된 로직을
 
 ### token.json 최초 생성 (랩탑, 1회)
 
-```python
-from google_auth_oauthlib.flow import InstalledAppFlow
-flow = InstalledAppFlow.from_client_secrets_file(
-    "client_secret.json", scopes=["https://www.googleapis.com/auth/drive.file"])
-creds = flow.run_local_server(port=0)
-open("token.json", "w").write(creds.to_json())
+client_secret.json을 저장소 루트에 두고(커밋 금지 — .gitignore로 제외됨) 실행:
+
+```bash
+pip install google-auth-oauthlib google-api-python-client
+python scripts/gdrive_auth.py        # 브라우저 동의 → token.json 생성
 ```
+
+스크립트가 ① OAuth 동의(drive.file) ② SSOT 루트 폴더 생성 ③ GitHub Secrets에
+넣을 `GDRIVE_ROOT_FOLDER_ID`·`GDRIVE_TOKEN_JSON_B64` 값까지 한 번에 출력한다.
 
 ## 실행 순서 (최초 가동)
 

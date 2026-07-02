@@ -1,0 +1,43 @@
+# 트랙2 — 격주 토요일 다관점 랭킹 (봇2). 크론은 매주 토 실행하되
+# ISO 주차 짝수 주만 진행하는 방식으로 격주를 구현한다.
+name: track2-biweekly
+
+on:
+  schedule:
+    - cron: "0 1 * * 6"       # 매주 토 UTC 01:00 (KST 10:00)
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+      GDRIVE_TOKEN_FILE: token.json
+    steps:
+      - name: Biweekly check (짝수 ISO 주만)
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ $((10#$(date -u +%V) % 2)) -eq 0 ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.run == 'true'
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.run == 'true'
+        with:
+          python-version: "3.11"
+      - if: steps.check.outputs.run == 'true'
+        run: pip install -r requirements.txt
+      - name: Restore Google Drive token
+        if: steps.check.outputs.run == 'true'
+        run: echo "${{ secrets.GDRIVE_TOKEN_JSON_B64 }}" | base64 -d > token.json
+      - if: steps.check.outputs.run == 'true'
+        run: python run_biweekly.py

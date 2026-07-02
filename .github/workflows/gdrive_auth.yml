@@ -1,0 +1,48 @@
+# Google Drive OAuth를 GitHub 웹에서만 수행하는 2단계 워크플로 (로컬 설치 불필요)
+#
+# 사용법:
+#  0) 저장소 Secrets에 GDRIVE_CLIENT_SECRET(client_secret.json의 GOCSPX-... 값) 등록
+#  1) Actions → gdrive-auth → Run workflow (step=url) → 로그의 URL을 브라우저에서 열어 동의
+#     → 'localhost 연결할 수 없음' 화면의 주소창 URL 전체 복사
+#  2) 10분 안에 Run workflow (step=token, auth_code=복사한 URL) 실행
+#  3) 실행 결과 페이지 하단 artifact 'gdrive-secrets' 다운로드 → txt 안의 두 값을
+#     Secrets(GDRIVE_ROOT_FOLDER_ID, GDRIVE_TOKEN_JSON_B64)에 등록
+#  4) 등록 후 해당 워크플로 런(artifact 포함)을 삭제할 것 — refresh token이 들어 있음
+name: gdrive-auth
+
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: "url(1단계: 동의 URL 출력) | token(2단계: 코드 교환)"
+        required: true
+        default: "url"
+      auth_code:
+        description: "step=token일 때 — 동의 후 리다이렉트된 주소창 URL 전체"
+        required: false
+        default: ""
+
+jobs:
+  auth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # OAuth client_id는 비밀이 아님(데스크톱 앱). client_secret만 Secrets로.
+      GDRIVE_CLIENT_ID: 557280281567-s1rel22eemkiesutmralglj3nmsjgkok.apps.googleusercontent.com
+      GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+      GDRIVE_AUTH_CODE: ${{ github.event.inputs.auth_code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - name: Run OAuth step
+        run: python scripts/gdrive_auth_web.py ${{ github.event.inputs.step }}
+      - name: Upload secrets artifact
+        if: github.event.inputs.step == 'token'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gdrive-secrets
+          path: gdrive_secrets.txt
+          retention-days: 1

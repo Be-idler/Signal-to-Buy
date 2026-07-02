@@ -231,6 +231,39 @@ def get_recent_disclosures(corp_code: str, bgn_de: str, end_de: str) -> list[dic
     return out
 
 
+def get_dividend_info(corp_code: str, year: int,
+                      reprt_code: str = REPRT_ANNUAL) -> list[dict]:
+    """배당에 관한 사항 (alotMatter) — E1 주주환원 결정론 산출용 (v1 §4)."""
+    data = _get("alotMatter.json", corp_code=corp_code,
+                bsns_year=str(year), reprt_code=reprt_code)
+    return [{"item": r.get("se"), "current": r.get("thstrm"),
+             "prior": r.get("frmtrm")} for r in data.get("list", [])]
+
+
+def get_treasury_stock(corp_code: str, year: int,
+                       reprt_code: str = REPRT_ANNUAL) -> list[dict]:
+    """자기주식 취득·처분 현황 (tesstkAcqsDspsSttus) — E1 미소각 자사주 판정용."""
+    data = _get("tesstkAcqsDspsSttus.json", corp_code=corp_code,
+                bsns_year=str(year), reprt_code=reprt_code)
+    return [{"method": r.get("acqs_mth2"), "kind": r.get("stock_knd"),
+             "begin": r.get("bsis_qy"), "acquired": r.get("change_qy_acqs"),
+             "disposed": r.get("change_qy_dsps"),
+             "retired": r.get("change_qy_incnr"),      # 소각
+             "end": r.get("trmend_qy")} for r in data.get("list", [])]
+
+
+def get_insider_transactions(corp_code: str) -> list[dict]:
+    """임원·주요주주 소유보고 (elestock) — F2 내부자 정렬(순증감) 결정론 산출용."""
+    data = _get("elestock.json", corp_code=corp_code)
+    out = []
+    for r in data.get("list", []):
+        out.append({"name": r.get("repror"), "date": r.get("rcept_dt"),
+                    "relation": r.get("isu_exctv_ofcps"),
+                    "shares": _parse_amount(r.get("sp_stock_lmp_cnt")),
+                    "change": _parse_amount(r.get("sp_stock_lmp_irds_cnt"))})
+    return out
+
+
 def get_executive_profiles(corp_code: str, year: int,
                            reprt_code: str = REPRT_ANNUAL) -> list[dict]:
     """사업보고서 '임원 현황' — 이름·직위·약력·재직기간."""

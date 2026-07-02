@@ -5,10 +5,14 @@
 - 5개 관점 점수는 절대 평균하지 않는다 (§6)
 - 임계·가중은 제안값 — 백테스트 전까지 실매매 판단 근거로 쓰지 않는다
 
-⚠️ 단도 B(사업질)·E(촉매)·F(경영진) 하위 정의는 v1 구현명세서 소관인데,
-이 구현 시점에 v1 저장소(Be-idler/Dhandho_RSI30)에 접근할 수 없어
-v2 명세서 §10의 LLM 매핑(B4·E2·F3)과 보수적 정량 proxy로 구성했다.
-→ 결과에 'v1_spec_unverified' 플래그를 남긴다. v1 명세서 §3~8 확인 후 보정할 것.
+단도 섹션 구성은 v1 구현명세서 §4 그대로:
+  A 질적우위(.25): A1 순현금 A2 NCAV A3 재무건전성 A4 FCF안정
+  B 수익성(.20):   B1 ROIC(.35) B2 마진예측(.25) B3 추세(.15) B4 해자(.25)🔶
+  C 저평가(.20):   C1 멀티플 C2 과거밴드 C3 이익추세 C4 과도낙폭
+  D 안정성(.15):   D1 매출이익추세(.30) D2 급락원인(.30)🔶 D3 산업사양화(.20)🔶 D4 생존력(.20)
+  E 주주환원(.10): E1 주주환원(.40)=미소각자사주+배당(결정론) E2 상법수혜(.35) E3 촉매근접(.25)
+  F 내부자(.10):   F1 자본배분(.35)🔶 F2 내부자정렬(.30)=소유보고 순증감(결정론) F3 IR투명성(.35)🔶
+  🔶 = LLM 그라운딩 항목 (B4·D2·D3·F1·F3, v1 §7)
 """
 from __future__ import annotations
 
@@ -244,62 +248,97 @@ def score_dhandho_quant(m: dict, peers: dict | None = None,
 
 
 def _score_B(m: dict, qual: dict | None) -> _Section:
-    """B 사업질 — ⚠️ v1 명세서 미확인 구성(모듈 docstring 참조)."""
+    """B 수익성 (v1 §4): B1 ROIC(.35) · B2 마진예측(.25) · B3 추세(.15) · B4 해자(.25)🔶."""
     s = _Section("B")
-    s.flags.append("v1_spec_unverified")
     b1 = _step(m.get("roic"), [(0.15, 5), (0.10, 4), (0.05, 3), (0.0, 2)], 1)
-    cv = m.get("op_margin_cv")
+    cv = m.get("op_margin_cv")               # 마진 변동계수 낮음 = 예측가능성 높음
     b2 = _step(-cv, [(-0.2, 5), (-0.4, 4), (-0.7, 3), (-1.0, 2)], 1) if cv is not None else None
-    b3 = _step(m.get("gpa"), [(0.35, 5), (0.25, 4), (0.15, 3), (0.05, 2)], 1)
-    b4 = _qual_score(qual, "B4")            # 해자·경쟁우위 (정성·LLM, §10)
-    s.add("B1", b1, 0.30)
+    b3 = _step(m.get("op_income_slope"),     # 이익 추세(회귀 기울기)
+               [(0.05, 5), (0.02, 4), (-0.02, 3), (-0.05, 2)], 1)
+    b4 = _qual_score(qual, "B4")             # 해자 (LLM 그라운딩)
+    s.add("B1", b1, 0.35)
     s.add("B2", b2, 0.25)
-    s.add("B3", b3, 0.20)
+    s.add("B3", b3, 0.15)
     s.add("B4", b4, 0.25)
     return s
 
 
-def _score_E(m: dict, qual: dict | None, disclosures: list[dict] | None) -> _Section:
-    """E 촉매 — ⚠️ v1 명세서 미확인 구성. 확정 공시 우선(§9 밸류업 원칙)."""
+def _score_E(m: dict, shareholder: dict | None = None,
+             policy: dict | None = None,
+             disclosures: list[dict] | None = None) -> _Section:
+    """E 주주환원 (v1 §4): E1 주주환원(.40)·E2 상법수혜(.35)·E3 촉매근접(.25).
+
+    E1은 DART 정기보고서(배당·자기주식)로 결정론 산출:
+      shareholder = {"dividend_paid": bool, "retired_any": bool,
+                     "unretired_treasury": bool}
+    E2·E3는 상법 타임라인(policy) 기반 — 미확보 시 2.5 캡.
+      policy = {"beneficiary_score": 1~5, "catalyst_score": 1~5}
+    (E1 세부 매핑은 v1 코드 대조 전 근사 — E1_heuristic 플래그)
+    """
     s = _Section("E")
-    s.flags.append("v1_spec_unverified")
     e1 = None
-    if disclosures is not None:
-        buyback = any("자기주식" in d.get("report_nm", "") or "자사주" in d.get("report_nm", "")
+    if shareholder is not None:
+        e1 = 3.5 if shareholder.get("dividend_paid") else 2.0
+        if shareholder.get("retired_any"):
+            e1 += 1.0                        # 소각 실행 = 진짜 환원 (§9 한국조정)
+        if shareholder.get("unretired_treasury"):
+            e1 -= 0.5                        # 미소각 자사주 축적 = 감점
+        e1 = _clip(e1)
+        s.flags.append("E1_heuristic")
+    e2 = policy.get("beneficiary_score") if policy else None
+    e3 = policy.get("catalyst_score") if policy else None
+    if e3 is None and disclosures:
+        # 폴백: 확정 공시(자사주·공급계약) 존재 = 촉매 근접 근사
+        buyback = any(("자기주식" in d.get("report_nm", "")) or ("자사주" in d.get("report_nm", ""))
                       for d in disclosures)
         supply = any("공급계약" in d.get("report_nm", "") for d in disclosures)
-        e1 = 4.5 if buyback else 4.0 if supply else 2.5
-    e2 = _qual_score(qual, "E2")            # 촉매 해석 (정성·LLM)
-    s.add("E1", e1, 0.50)
-    s.add("E2", e2, 0.50)
+        e3 = 4.0 if buyback else 3.5 if supply else None
+        if e3 is not None:
+            s.flags.append("E3_disclosure_proxy")
+    s.add("E1", e1, 0.40)
+    s.add("E2", e2, 0.35)
+    s.add("E3", e3, 0.25)
     return s
 
 
-def _score_F(m: dict, qual: dict | None) -> _Section:
-    """F 경영진 — ⚠️ v1 명세서 미확인 구성. F2·F3는 LLM(임원약력·공시 근거)."""
+def _score_F(m: dict, qual: dict | None,
+             insider: list[dict] | None = None) -> _Section:
+    """F 내부자 (v1 §4): F1 자본배분(.35)🔶 · F2 내부자정렬(.30, 결정론) · F3 IR투명성(.35)🔶.
+
+    F2는 임원·주요주주 소유보고(elestock) 순증감으로 결정론 산출.
+    """
     s = _Section("F")
-    s.flags.append("v1_spec_unverified")
-    f1 = _qual_score(qual, "F1")            # 내부자 지분·거래 (공시 기반)
-    f2 = _qual_score(qual, "F2")            # 약력·업 적합성
-    f3 = _qual_score(qual, "F3")            # 주주친화·정직성
-    s.add("F1", f1, 0.30)
+    f1 = _qual_score(qual, "F1")             # 자본배분 (LLM 그라운딩)
+    f2 = None
+    if insider is not None:
+        changes = [t.get("change") for t in insider if t.get("change") is not None]
+        if changes:
+            net = sum(changes)
+            f2 = 4.5 if net > 0 else 1.5 if net < 0 else 3.0
+        else:
+            f2 = 3.0                         # 최근 보고 없음 = 중립
+    f3 = _qual_score(qual, "F3")             # IR 투명성 (LLM 그라운딩)
+    s.add("F1", f1, 0.35)
     s.add("F2", f2, 0.30)
-    s.add("F3", f3, 0.40)
+    s.add("F3", f3, 0.35)
     return s
 
 
 def score_dhandho(m: dict, qual: dict | None = None, peers: dict | None = None,
                   band_series: list[float] | None = None,
                   audit: dict | None = None,
-                  disclosures: list[dict] | None = None) -> dict:
+                  disclosures: list[dict] | None = None,
+                  shareholder: dict | None = None,
+                  insider: list[dict] | None = None,
+                  policy: dict | None = None) -> dict:
     """단도 최종 스코어 (트리거 B — LLM 정성 반영 후 전체 A~F)."""
     sections = {
         "A": _score_A(m, peers),
         "B": _score_B(m, qual),
         "C": _score_C(m, peers, band_series),
         "D": _score_D(m, qual, audit),
-        "E": _score_E(m, qual, disclosures),
-        "F": _score_F(m, qual),
+        "E": _score_E(m, shareholder, policy, disclosures),
+        "F": _score_F(m, qual, insider),
     }
     results = {k: v.result() for k, v in sections.items()}
     total = round(sum(results[k]["total"] * w

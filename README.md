@@ -58,11 +58,13 @@ v1(Dhandho_RSI30, RSI<30 → 단도 게이트 → 신호)의 검증된 로직을
 3. **랩탑에서 1회** 설치형 OAuth 동의 실행(스코프 `drive.file`) → `token.json` 생성
    후 실행 환경에 배치 (서비스 계정은 개인 드라이브 용량이 없어 사용 불가)
 4. 드라이브에 SSOT 루트 폴더 생성 → 폴더 ID를 `GDRIVE_ROOT_FOLDER_ID`로
-5. 환경변수: `DART_API_KEY`, `ANTHROPIC_API_KEY`, `TELEGRAM_BOT1_TOKEN/CHAT_ID`,
-   `TELEGRAM_BOT2_TOKEN/CHAT_ID`, `GDRIVE_CLIENT_SECRETS`, `GDRIVE_TOKEN_FILE`,
-   `GDRIVE_ROOT_FOLDER_ID`, `LOCAL_CACHE_DIR`
-6. GitHub Actions 사용 시 위 값들을 Secrets로 등록(+ `GDRIVE_TOKEN_JSON_B64` =
-   token.json의 base64)
+5. 환경변수(현재 저장소 Secrets에 등록 완료): `DART_API_KEY`, `KRX_API_KEY`,
+   `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+   — 봇1/봇2 전용 변수(`TELEGRAM_BOT1_*`/`TELEGRAM_BOT2_*`)가 없으면 공용 봇으로 폴백.
+   Drive용은 추가 등록 필요: `GDRIVE_ROOT_FOLDER_ID`, `GDRIVE_TOKEN_JSON_B64`
+   (token.json의 base64. 로컬 실행 시엔 `GDRIVE_TOKEN_FILE` 경로 사용)
+6. KRX Open API는 인증키 발급과 **별개로 데이터셋별 이용신청** 필요
+   (유가증권/코스닥 일별매매정보 — v1 README 참조)
 
 ### token.json 최초 생성 (랩탑, 1회)
 
@@ -89,13 +91,32 @@ python run_trigger_b.py                     # 일일 후반부 (다음날 개장
 python run_biweekly.py                      # 격주 다관점 랭킹
 ```
 
+## v1 정렬 현황
+
+v1 구현명세서(`docs/v1_구현명세서.md`)·README(`docs/v1_README.md`) 기준으로 정렬됨:
+
+- **섹션 구성 = v1 §4 그대로**: B 수익성(B1 ROIC .35 / B2 마진예측 .25 / B3 추세 .15 /
+  B4 해자 .25), E 주주환원(E1 .40 / E2 상법수혜 .35 / E3 촉매근접 .25),
+  F 내부자(F1 자본배분 .35 / F2 내부자정렬 .30 / F3 IR투명성 .35)
+- **LLM 그라운딩 항목 = v1 §7**: B4·D2·D3·F1·F3, grounded=false → 2.5 상한+플래그,
+  압축 출력(reason ≤60자) + drop_reason/selection_reason, `LLM_MAX`(8) 상한
+- **신호 = v1 §5**: BUY(게이트+총점≥4.0) / WATCH / PASS(총점<3.0),
+  A·D 근거불충분 플래그 시 BUY 불가
+- **알림 = v1 §6**: BUY 우선, BUY 0건이면 그라운딩 숏리스트 폴백(3줄/종목)
+- **KRX = v1 L0**: 공식 Open API(data-dbg.krx.co.kr, AUTH_KEY) + L1 유동성 필터
+  (보통주만 · 20일 평균 거래대금 ≥1억 · 거래정지 제외)
+- **E1·F2 결정론 산출 = v1 §4**: DART alotMatter(배당)·tesstkAcqsSttus(자기주식)·
+  elestock(내부자 소유보고) 연동
+
 ## 미해결 · 검증 필요 (플래그로 표시됨)
 
-- **1단계 실키 검증 미수행**: 이 환경에는 DART 키가 없어 `scripts/validate_dart.py`를
-  운영자가 실행해 `operating_income` 태그·차입금 합산을 실측 확인해야 한다.
-- **단도 B(사업질)·E(촉매)·F(경영진) 하위 정의**: v1 구현명세서(Dhandho_RSI30
-  `docs/`) 접근 불가로 v2 §10 매핑 + 보수적 proxy로 구성 → 결과에
-  `v1_spec_unverified` 플래그. v1 명세서 §3~8 대조 후 보정할 것.
+- **1단계 실키 검증**: `scripts/validate_dart.py`를 실키로 실행해
+  `operating_income` 태그·차입금 합산을 실측 확인 → `ACCOUNT_MAP` 보정.
+- **E1 세부 매핑**: v1 명세서는 '미소각 자사주비중+배당 결정론'까지만 정의 —
+  정확한 점수 매핑은 v1 코드 대조 필요(`E1_heuristic` 플래그).
+- **E2·E3 상법 타임라인**: v1 `policy_timeline` 테이블 데이터 미이식 — 확보 전까지
+  2.5 캡(E3는 확정 공시 proxy 폴백).
 - **C2 자기 5년 밴드**: 과거 시총 시계열 축적 전까지 2.5 캡(적재가 쌓이면 자동 개선).
-- **업종 세분류**: 현재 전체시장 백분위 폴백 — KRX 업종 매핑 추가 시 §13.0 완전 충족.
+- **업종 세분류**: 현재 전체시장 백분위 폴백 — v1 universe 태깅(금융/지주/리츠) 이식 시
+  §13.0 완전 충족.
 - **백테스트**: 모든 임계·가중은 제안값. 검증 전 실매매 판단 금지.

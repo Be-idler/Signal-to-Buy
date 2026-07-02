@@ -22,26 +22,28 @@ def test_quant_gate_pass():
     assert not quant_gate_pass({"A_quant": 5.0, "D_quant": 2.9})
 
 
-def test_buy_candidate():
+def test_buy():
     d = decide_signal(_result())
-    assert d["verdict"] == "BUY_CANDIDATE"
+    assert d["verdict"] == "BUY"
     assert d["gates_ok"]
 
 
-def test_gate_fail_downgrades_to_hold():
+def test_gate_fail_is_watch():
     d = decide_signal(_result(d=2.5, total=3.5))
-    assert d["verdict"] == "HOLD"
+    assert d["verdict"] == "WATCH"
+    assert not d["gates_ok"]
 
 
-def test_gate_fail_low_total_excludes():
+def test_low_total_is_pass_even_with_gate_fail():
     d = decide_signal(_result(a=2.0, d=2.0, total=2.4))
-    assert d["verdict"] == "EXCLUDE"
+    assert d["verdict"] == "PASS"
 
 
-def test_insufficient_flag_in_gate_section_downgrades_to_watch():
-    # §13.0: 게이트 섹션(A·D)에 근거불충분 플래그 → WATCH 강등
+def test_insufficient_flag_blocks_buy():
+    # v1 §5: A·D 근거불충분 플래그 → 게이트 미통과 → BUY 불가(WATCH)
     d = decide_signal(_result(d_flags=["D4_insufficient"]))
     assert d["verdict"] == "WATCH"
+    assert not d["gates_ok"]
     assert "D4_insufficient" in d["gate_flags"]
 
 
@@ -50,6 +52,6 @@ def test_watch_band():
     assert d["verdict"] == "WATCH"
 
 
-def test_low_total_excluded():
+def test_low_total_pass():
     d = decide_signal(_result(total=2.5))
-    assert d["verdict"] == "EXCLUDE"
+    assert d["verdict"] == "PASS"

@@ -18,29 +18,30 @@ import config
 
 _SCORING_RUBRIC = """당신은 한국 상장사 정성 분석가다. 아래 자료만 근거로 각 항목을 1.0~5.0으로 채점하라.
 
-채점 항목(단도투자 프레임워크):
-- D2 급락 원인: 최근 주가 급락/실적 부진이 일회성(5)인가, 혼재(3)인가, 영구적 훼손(1)인가
-- D3 산업 사양화: 성장/성숙안정(4~5), 성숙후기(3), 사양산업(1~2)
-- B4 사업질·해자: 경쟁우위가 입증되는가(5) / 보통(3) / 약함(1)
-- E2 촉매: 확정 공시 기반 촉매(자사주 소각·밸류업·공급계약)가 있는가. 루머는 무시
-- F1 내부자 지분·거래: 내부자 매수/높은 지분(5) ~ 내부자 매도·담보(1)
-- F2 경영진 약력 적합성: 업과 정합한 이력(5) / 불명(3) / 부적합·잦은 교체(1)
-- F3 주주친화·정직성: 소각·배당·정직한 공시(5) / 보통(3) / 터널링·관계자거래 정황(1)
+채점 항목(v1 단도투자 그라운딩 항목 — B4·D2·D3·F1·F3):
+- B4 해자: 경쟁우위(브랜드·전환비용·원가우위)가 근거로 입증(5) / 보통(3) / 약함(1)
+- D2 급락 원인: 최근 급락/실적 부진이 일회성(5) / 혼재(3) / 영구적 훼손(1)
+- D3 산업 사양화: 성장/성숙안정(4~5) / 성숙후기(3) / 사양산업(1~2)
+- F1 자본배분: 재투자·인수·환원이 합리적(5) / 보통(3) / 가치파괴(증자 남발·고가 M&A)(1)
+- F3 IR 투명성: 정직·일관된 공시와 소통(5) / 보통(3) / 불투명·정정 반복·터널링 정황(1)
 
 규칙:
-1. 모든 점수에 근거 출처를 붙여라. 근거 없는 항목은 score를 null로 두어라(추측 금지).
+1. 근거가 있는 항목만 채점하고 grounded=true. 근거 부족이면 score=null, grounded=false(추측 금지).
 2. 출처 계층: tier 1=DART 공시, 2=IR 자료, 3=미디어. DART·IR 우선, 미디어는 보조.
 3. 인터뷰·기사 내용은 사실이 아니라 '경영진의 주장'으로 취급하라.
-4. 원문을 복제하지 말고 사실·요지만 요약하라.
-5. 터널링·횡령·소수주주 침해가 확인되면 F3에 "tunneling_confirmed": true를 넣어라.
+4. 원문을 복제하지 말고 요지만. reason은 60자 이내.
+5. 터널링·횡령·소수주주 침해가 확인되면 F3에 "tunneling_confirmed": true.
+6. 마지막에 drop_reason(하락 사유 한 문장), selection_reason(종목 선정/탈락 관점 한 문장)을 넣어라.
 
 출력은 아래 JSON만 (설명 문장 금지):
-{"D2":{"score":n|null,"basis":[{"tier":1,"source":"문서명/rcept_no","date":"YYYYMMDD","summary":"요지"}]},
- "D3":{...},"B4":{...},"E2":{...},"F1":{...},"F2":{...},"F3":{...}}"""
+{"B4":{"score":n|null,"grounded":true|false,"reason":"≤60자",
+       "basis":[{"tier":1,"source":"문서명/rcept_no","date":"YYYYMMDD"}]},
+ "D2":{...},"D3":{...},"F1":{...},"F3":{...},
+ "drop_reason":"...","selection_reason":"..."}"""
 
 _EXTRACT_PROMPT = """다음 자료에서 아래 주제와 관련된 구절만 추출·요약하라(원문 복제 금지, 요지만):
-주제: ①최근 급락/실적 부진의 원인 ②산업 전망 ③경쟁우위 ④촉매(자사주·소각·밸류업·공급계약)
-⑤내부자 지분·거래 ⑥경영진 약력 ⑦주주환원·지배구조·관계자거래.
+주제: ①최근 급락/실적 부진의 원인 ②산업 전망·수명주기 ③경쟁우위·해자
+④자본배분(재투자·인수·증자·환원) ⑤IR 투명성·공시 품질·지배구조·관계자거래.
 각 항목에 출처(문서명, 일자, tier: 1=DART 2=IR 3=미디어)를 붙여라. 관련 내용이 없으면 "없음"."""
 
 
@@ -143,9 +144,15 @@ def _parse_qual(text: str) -> dict:
         return {"_error": "json_decode"}
     out: dict = {}
     for key, item in raw.items():
+        if key in ("drop_reason", "selection_reason"):
+            out[key] = item                  # v1 폴백 다이제스트용 문장
+            continue
         if not isinstance(item, dict):
             continue
-        entry = {"score": item.get("score"), "basis": item.get("basis") or []}
+        entry = {"score": item.get("score"), "basis": item.get("basis") or [],
+                 "reason": item.get("reason")}
+        if item.get("grounded") is False:
+            entry["basis"] = []              # grounded=false → 2.5 상한+플래그 (v1 §7)
         if item.get("tunneling_confirmed"):
             entry["tunneling_confirmed"] = True
         out[key] = entry

@@ -21,9 +21,10 @@ jobs:
     timeout-minutes: 120
     env:
       DART_API_KEY: ${{ secrets.DART_API_KEY }}
+      KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      TELEGRAM_BOT1_TOKEN: ${{ secrets.TELEGRAM_BOT1_TOKEN }}
-      TELEGRAM_BOT1_CHAT_ID: ${{ secrets.TELEGRAM_BOT1_CHAT_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
       GDRIVE_TOKEN_FILE: token.json
     steps:

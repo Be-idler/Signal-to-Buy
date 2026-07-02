@@ -112,21 +112,39 @@ def test_c4_sweet_spot_drawdown():
 # ─────────────────────────────────── 단도 최종 (qual 반영)
 
 def test_full_dhandho_with_qual():
+    # v1 그라운딩 항목: B4·D2·D3·F1·F3
     qual = {k: {"score": 5.0, "basis": [{"tier": 1, "source": "rcept", "date": "20260101"}]}
-            for k in ("D2", "D3", "B4", "E2", "F1", "F2", "F3")}
+            for k in ("B4", "D2", "D3", "F1", "F3")}
     r = score_dhandho(_metrics(), qual=qual, peers=_peers(),
                       audit={"opinion": "적정"},
-                      disclosures=[{"report_nm": "주요사항보고서(자기주식취득결정)"}])
+                      disclosures=[{"report_nm": "주요사항보고서(자기주식취득결정)"}],
+                      shareholder={"dividend_paid": True, "retired_any": True,
+                                   "unretired_treasury": False},
+                      insider=[{"change": 1000.0}])
     assert r["sections"]["D"]["subscores"]["D2"]["score"] == 5.0
     assert r["sections"]["A"]["total"] == 5.0
+    assert r["sections"]["E"]["subscores"]["E1"]["score"] == 4.5   # 배당+소각
+    assert r["sections"]["F"]["subscores"]["F2"]["score"] == 4.5   # 내부자 순매수
     assert r["total"] > 4.0
-    assert "v1_spec_unverified" in r["flags"]          # B·E·F 구성 미검증 플래그
+    assert "E1_heuristic" in r["flags"]                # E1 세부 매핑은 v1 코드 대조 전 근사
 
 
 def test_qual_without_basis_capped():
-    qual = {"D2": {"score": 5.0, "basis": []}}         # 근거 없음 → 2.5 상한
+    qual = {"D2": {"score": 5.0, "basis": []}}         # 근거 없음(grounded=false) → 2.5 상한
     r = score_dhandho(_metrics(), qual=qual)
     assert r["sections"]["D"]["subscores"]["D2"]["score"] == 2.5
+
+
+def test_e_section_hoarded_treasury_penalized():
+    r = score_dhandho(_metrics(),
+                      shareholder={"dividend_paid": True, "retired_any": False,
+                                   "unretired_treasury": True})
+    assert r["sections"]["E"]["subscores"]["E1"]["score"] == 3.0   # 3.5 − 0.5
+
+
+def test_f2_insider_net_selling():
+    r = score_dhandho(_metrics(), insider=[{"change": -500.0}, {"change": 100.0}])
+    assert r["sections"]["F"]["subscores"]["F2"]["score"] == 1.5
 
 
 # ─────────────────────────────────── LTGG / 아웃사이더 / 버핏

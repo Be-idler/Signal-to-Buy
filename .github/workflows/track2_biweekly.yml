@@ -12,8 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      TELEGRAM_BOT2_TOKEN: ${{ secrets.TELEGRAM_BOT2_TOKEN }}
-      TELEGRAM_BOT2_CHAT_ID: ${{ secrets.TELEGRAM_BOT2_CHAT_ID }}
+      KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
       GDRIVE_TOKEN_FILE: token.json
     steps:

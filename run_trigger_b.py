@@ -19,19 +19,30 @@ WAIT_MINUTES = 60          # 배치 미완료 시 최대 대기
 POLL_INTERVAL = 300
 
 
-def _format_signal(ticker: str, entry: dict, decision: dict, result: dict) -> str:
-    icon = {"BUY_CANDIDATE": "🟢", "WATCH": "🟡", "HOLD": "⚪", "EXCLUDE": "⚫"}
+def _format_buy(ticker: str, entry: dict, decision: dict, result: dict) -> str:
+    """BUY 상세 (v1 format_buy 준용)."""
     lines = [
-        f"{icon.get(decision['verdict'], '•')} {ticker}  [{decision['verdict']}]",
+        f"🟢 {ticker}  [BUY]",
         f"  RSI {entry.get('rsi')} | 총점 {decision['total']:.2f} "
         f"(A {decision['A']:.2f} / D {decision['D']:.2f})",
         f"  {decision['reason']}",
     ]
     secs = result["sections"]
     lines.append("  섹션: " + " ".join(f"{k}={secs[k]['total']:.1f}" for k in "ABCDEF"))
-    if decision["gate_flags"]:
-        lines.append(f"  ⚠ 근거불충분: {', '.join(decision['gate_flags'][:5])}")
     return "\n".join(lines)
+
+
+def _format_digest_row(ticker: str, entry: dict, decision: dict, qual: dict,
+                       m: dict) -> str:
+    """그라운딩 숏리스트 폴백 — 3줄/종목 (v1 §6)."""
+    drop = (qual.get("drop_reason")
+            or (qual.get("D2") or {}).get("reason"))
+    if not drop:
+        dd = m.get("drawdown_52w")
+        drop = f"52주 고점 대비 {dd:+.0%}" if dd is not None else "하락사유 미확보"
+    select = qual.get("selection_reason") or "선정사유 미확보"
+    return (f"• {ticker} — 총점 {decision['total']:.2f} · {decision['verdict']} · "
+            f"RSI {entry.get('rsi')}\n  하락사유: {drop}\n  선정사유: {select}")
 
 
 def main() -> int:
@@ -62,22 +73,35 @@ def main() -> int:
                     break
                 time.sleep(POLL_INTERVAL)
 
-        # ⑥ 최종 게이트 + 알림
-        messages = [f"📊 단도 일일 신호 {date_str} (finalists {len(finalists)})",
-                    "※ 미검증 임계 기반 '후보' 알림 — 최종 판단은 사람"]
+        # ⑥ 최종 게이트 → v1 알림 정책: BUY 우선, BUY 0건이면 그라운딩 숏리스트 폴백
+        buys, digest_rows = [], []
         for ticker, entry in sorted(finalists.items()):
             qual = qual_by_ticker.get(ticker) or {}
             result = frameworks.score_dhandho(
                 entry["metrics"], qual=qual,
-                disclosures=entry.get("disclosures"))
+                disclosures=entry.get("disclosures"),
+                shareholder=entry.get("shareholder"),
+                insider=entry.get("insider"))
             decision = gate.decide_signal(result)
             storage.save_json(
-                {"date": date_str, "result": result, "decision": decision},
+                {"date": date_str, "result": result, "decision": decision,
+                 "qual": qual},
                 f"signals/{date_str}_{ticker}.json")
-            messages.append(_format_signal(ticker, entry, decision, result))
+            if decision["verdict"] == "BUY":
+                buys.append(_format_buy(ticker, entry, decision, result))
+            if qual and not qual.get("_error"):     # 그라운딩된 종목만 폴백 대상
+                digest_rows.append(_format_digest_row(ticker, entry, decision,
+                                                      qual, entry["metrics"]))
 
-        notify.send_bot1("\n\n".join(messages))
-        print(f"[trigger_b] sent signals for {len(finalists)} finalists")
+        header = f"📊 단도 일일 신호 {date_str} — 최종 판단은 사람"
+        if buys:
+            notify.send_bot1("\n\n".join([header] + buys))
+        elif digest_rows:
+            notify.send_bot1("\n\n".join(
+                [header + "\n(BUY 0건 — 그라운딩 숏리스트 폴백)"] + digest_rows))
+        else:
+            notify.send_bot1(f"📭 {date_str} 단도 트랙: BUY 0건, 그라운딩 종목 없음")
+        print(f"[trigger_b] BUY {len(buys)} / digest {len(digest_rows)}")
         return 0
     except Exception:
         notify.notify_failure("trigger_b", traceback.format_exc())

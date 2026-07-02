@@ -37,6 +37,23 @@ def _jsonable(obj):
     return obj
 
 
+def _shareholder_summary(dividend: list[dict], treasury: list[dict]) -> dict:
+    """DART 배당·자기주식 현황 → E1 결정론 입력 (v1: 미소각 자사주비중+배당)."""
+    def _num(v):
+        try:
+            return float(str(v).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+
+    dividend_paid = any(
+        "현금배당" in (d.get("item") or "") and (_num(d.get("current")) or 0) > 0
+        for d in dividend)
+    retired_any = any((_num(t.get("retired")) or 0) > 0 for t in treasury)
+    unretired = any((_num(t.get("end")) or 0) > 0 for t in treasury)
+    return {"dividend_paid": dividend_paid, "retired_any": retired_any,
+            "unretired_treasury": unretired}
+
+
 def _load_financials() -> tuple[dict[str, dict], dict[str, list[dict]], dict[str, str]]:
     """Drive의 최신 분기 SSOT + 다년 사업보고서 → (최신 fin, history, corp_code)."""
     # 최신 보고서 우선순위: 올해/작년 분기·반기·사업 순으로 가장 최근 것
@@ -90,9 +107,10 @@ def main() -> int:
         snap_df = pd.DataFrame(snapshots[date_str])
         storage.upload_parquet(snap_df, f"prices/eod_{date_str}.parquet")
 
-        # ② RSI<30 1차 필터
+        # ② RSI<30 1차 필터 + 유동성/품질 필터 (v1 L1: 보통주·거래대금·정지 제외)
         oversold = rsi.filter_oversold(eod, config.RSI_PERIOD, config.RSI_THRESHOLD)
-        print(f"[trigger_a] RSI<{config.RSI_THRESHOLD}: {len(oversold)} candidates")
+        oversold = {t: v for t, v in oversold.items() if krx.passes_liquidity(eod[t])}
+        print(f"[trigger_a] RSI<{config.RSI_THRESHOLD} + 유동성 필터: {len(oversold)} candidates")
 
         # ③ 분기 재무 + 당일 시총 결합 (전 종목 — peer pool 산출에도 필요)
         fin_by_ticker, history, corp_by = _load_financials()
@@ -125,26 +143,38 @@ def main() -> int:
 
         if finalists:
             # ⑤ 정성 자료 수집 (L-Δ 델타) — finalists 한정
+            #    + E1(배당·자기주식)·F2(내부자 소유보고) 결정론 입력 (v1 §4)
             bgn = (today - dt.timedelta(days=90)).strftime("%Y%m%d")
             docs: dict[str, dict] = {}
             for t in finalists:
                 corp = corp_by.get(t)
-                disclosures, execs = [], []
+                disclosures, execs, insider = [], [], []
+                shareholder = None
                 if corp:
                     try:
                         disclosures = dart.get_recent_disclosures(corp, bgn, date_str)
                         execs = dart.get_executive_profiles(corp, today.year - 1)
+                        insider = dart.get_insider_transactions(corp)
+                        dividend = dart.get_dividend_info(corp, today.year - 1)
+                        treasury = dart.get_treasury_stock(corp, today.year - 1)
+                        shareholder = _shareholder_summary(dividend, treasury)
                     except RuntimeError as e:
                         print(f"[trigger_a] delta fetch failed {t}: {e}")
                 docs[t] = {"disclosures": disclosures, "executives": execs}
                 storage.save_json(docs[t], f"delta/{date_str}_{t}.json")
                 finalists[t]["disclosures"] = disclosures
+                finalists[t]["insider"] = insider[:30]
+                finalists[t]["shareholder"] = shareholder
 
-            # ⑥ LLM: Haiku 추출(동기·저렴) → Sonnet 채점 Batch 제출(async)
-            extracted = llm.extract_passages(docs)
+            # ⑥ LLM: 그라운딩 대상은 A_quant 상위 LLM_MAX개 한정 (v1 토큰절감 2축)
+            #    Haiku 추출(동기·저렴) → Sonnet 채점 Batch 제출(async, −50%)
+            llm_targets = sorted(finalists, key=lambda t: -finalists[t]["quant"]["A_quant"])
+            llm_targets = llm_targets[:config.LLM_MAX]
+            extracted = llm.extract_passages({t: docs[t] for t in llm_targets})
             batch_id = llm.submit_batch(extracted)
             checkpoint["batch_id"] = batch_id
-            print(f"[trigger_a] batch submitted: {batch_id}")
+            checkpoint["llm_targets"] = llm_targets
+            print(f"[trigger_a] batch submitted: {batch_id} (targets={llm_targets})")
 
         checkpoint["finalists"] = _jsonable(finalists)
         storage.save_json(checkpoint, f"checkpoints/trigger_a_{date_str}.json")

@@ -17,36 +17,37 @@ def quant_gate_pass(quant: dict) -> bool:
 
 
 def decide_signal(result: dict) -> dict:
-    """단도 최종 신호 판정 (score_dhandho 결과 입력).
+    """단도 최종 신호 판정 (score_dhandho 결과 입력) — v1 §5 그대로.
 
-    §13.0: 게이트 섹션(A·D)에 근거불충분 플래그가 끼면 WATCH 강등.
-    §11 등급: 총점 ≥4.0 & 게이트 통과 → BUY 후보 / 3.0~4.0 → WATCH /
-              게이트 미통과 → HOLD / <3.0 → EXCLUDE.
+    게이트 통과 ⟺ A≥3.0 AND D≥3.0 AND A·D에 근거불충분 플래그 없음
+    BUY   ⟺ 게이트 통과 AND 총점 ≥ 4.0   (LLM 그라운딩을 거친 고확신 후보)
+    PASS  ⟺ 총점 < 3.0
+    WATCH ⟺ 그 외
     """
     sections = result["sections"]
     a_total = sections["A"]["total"]
     d_total = sections["D"]["total"]
     total = result["total"]
 
-    gates_ok = a_total >= config.GATE_A_MIN and d_total >= config.GATE_D_MIN
     gate_flags = [f for f in sections["A"]["flags"] + sections["D"]["flags"]
                   if f.endswith("_insufficient")]
+    gates_ok = (a_total >= config.GATE_A_MIN and d_total >= config.GATE_D_MIN
+                and not gate_flags)
 
-    if not gates_ok:
-        verdict = "HOLD" if total >= config.SCORE_WATCH_MIN else "EXCLUDE"
-        reason = f"게이트 미통과 (A={a_total:.2f}, D={d_total:.2f})"
-    elif gate_flags:
-        verdict = "WATCH"                     # 게이트 섹션 근거불충분 → 강등
-        reason = f"게이트 섹션 근거불충분: {', '.join(gate_flags)}"
-    elif total >= config.SCORE_BUY_MIN:
-        verdict = "BUY_CANDIDATE"             # '후보' — 판단은 사람
-        reason = f"총점 {total:.2f} ≥ {config.SCORE_BUY_MIN}, 게이트 통과"
-    elif total >= config.SCORE_WATCH_MIN:
-        verdict = "WATCH"
-        reason = f"총점 {total:.2f} (3.0~4.0 구간)"
-    else:
-        verdict = "EXCLUDE"
+    if gates_ok and total >= config.SCORE_BUY_MIN:
+        verdict = "BUY"
+        reason = f"게이트 통과 & 총점 {total:.2f} ≥ {config.SCORE_BUY_MIN}"
+    elif total < config.SCORE_WATCH_MIN:
+        verdict = "PASS"
         reason = f"총점 {total:.2f} < {config.SCORE_WATCH_MIN}"
+    else:
+        verdict = "WATCH"
+        if not gates_ok:
+            why = (f"근거불충분 {', '.join(gate_flags)}" if gate_flags
+                   else f"A={a_total:.2f}/D={d_total:.2f}")
+            reason = f"게이트 미통과 ({why})"
+        else:
+            reason = f"총점 {total:.2f} < {config.SCORE_BUY_MIN}"
 
     return {"verdict": verdict, "reason": reason, "total": total,
             "A": a_total, "D": d_total, "gates_ok": gates_ok,

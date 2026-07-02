@@ -1,0 +1,16 @@
+# 코어
+requests>=2.31
+pandas>=2.0
+pyarrow>=14.0
+duckdb>=0.10
+
+# LLM (§10 — Haiku 추출 / Sonnet 채점 Batch)
+anthropic>=0.40
+
+# Google Drive 저장 백엔드
+google-api-python-client>=2.100
+google-auth>=2.23
+google-auth-oauthlib>=1.1
+
+# 개발
+pytest>=7.4

@@ -1,0 +1,34 @@
+# L-Q 분기 전수 적재 — 무겁고 DART 호출이 잦으므로 수동 트리거(§8은 로컬/클라우드
+# 실행을 권장 — Actions에서 돌릴 경우 한도 초과 시 체크포인트에서 재개).
+name: quarterly-bulk
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "사업연도 (예: 2025)"
+        required: true
+      reprt_code:
+        description: "11011(사업) 11012(반기) 11013(1분기) 11014(3분기)"
+        required: true
+        default: "11011"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      DART_API_KEY: ${{ secrets.DART_API_KEY }}
+      TELEGRAM_BOT1_TOKEN: ${{ secrets.TELEGRAM_BOT1_TOKEN }}
+      TELEGRAM_BOT1_CHAT_ID: ${{ secrets.TELEGRAM_BOT1_CHAT_ID }}
+      GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+      GDRIVE_TOKEN_FILE: token.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Restore Google Drive token
+        run: echo "${{ secrets.GDRIVE_TOKEN_JSON_B64 }}" | base64 -d > token.json
+      - run: python run_quarterly.py ${{ github.event.inputs.year }} ${{ github.event.inputs.reprt_code }}

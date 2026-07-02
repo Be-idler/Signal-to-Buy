@@ -1,0 +1,48 @@
+# 트랙1 — 일일 단도 파이프라인 (명세서 §2 타임라인, 크론은 UTC)
+# 트리거 A: UTC 11:00 (KST 20:00) — RSI 필터·정량 게이트·LLM 배치 제출
+# 트리거 B: UTC 21:30 (KST 06:30, 개장 전) — 배치 수신·최종 신호·봇1 알림
+# KRX 휴장일 여부는 run_trigger_a 내부에서 판정해 스킵한다.
+name: track1-daily
+
+on:
+  schedule:
+    - cron: "0 11 * * 1-5"    # trigger A
+    - cron: "30 21 * * 1-5"   # trigger B
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "trigger_a | trigger_b"
+        required: true
+        default: "trigger_a"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      DART_API_KEY: ${{ secrets.DART_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      TELEGRAM_BOT1_TOKEN: ${{ secrets.TELEGRAM_BOT1_TOKEN }}
+      TELEGRAM_BOT1_CHAT_ID: ${{ secrets.TELEGRAM_BOT1_CHAT_ID }}
+      GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+      GDRIVE_TOKEN_FILE: token.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Restore Google Drive token
+        run: echo "${{ secrets.GDRIVE_TOKEN_JSON_B64 }}" | base64 -d > token.json
+      - name: Decide stage
+        id: stage
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "stage=${{ github.event.inputs.stage }}" >> "$GITHUB_OUTPUT"
+          elif [ "$(date -u +%H)" -lt 15 ]; then
+            echo "stage=trigger_a" >> "$GITHUB_OUTPUT"
+          else
+            echo "stage=trigger_b" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run stage
+        run: python run_${{ steps.stage.outputs.stage }}.py

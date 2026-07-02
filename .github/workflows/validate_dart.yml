@@ -1,0 +1,26 @@
+# DART 파싱 실측 검증 — 웹에서 수동 실행 (1단계 검증 하네스)
+# operating_income 태그·차입금 합산·분기보고서 손익 기준(thstrm vs 누적)을
+# 실데이터로 확인해 ACCOUNT_MAP / TTM 로직을 보정한다. 결과는 로그로 출력.
+name: validate-dart
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "검증 종목 (공백 구분, 예: 005930 000660)"
+        required: false
+        default: "005930 000660"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DART_API_KEY: ${{ secrets.DART_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests pandas pyarrow
+      - run: python scripts/validate_dart.py ${{ github.event.inputs.tickers }}

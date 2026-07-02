@@ -54,32 +54,55 @@ def _shareholder_summary(dividend: list[dict], treasury: list[dict]) -> dict:
             "unretired_treasury": unretired}
 
 
+def _df_to_fins(df) -> dict[str, dict]:
+    """parquet DataFrame → {ticker: 정규화 fin dict} (NaN→None, flags 파싱)."""
+    fins: dict[str, dict] = {}
+    if df is None:
+        return fins
+    for _, row in df.iterrows():
+        d = row.to_dict()
+        raw_flags = d.get("flags")
+        d["flags"] = raw_flags.split(";") if isinstance(raw_flags, str) and raw_flags else []
+        d = {k: (None if (not isinstance(v, list) and pd.isna(v)) else v)
+             for k, v in d.items()}
+        fins[d["ticker"]] = d
+    return fins
+
+
 def _load_financials() -> tuple[dict[str, dict], dict[str, list[dict]], dict[str, str]]:
-    """Drive의 최신 분기 SSOT + 다년 사업보고서 → (최신 fin, history, corp_code)."""
+    """Drive의 최신 분기 SSOT + 다년 사업보고서 → (최신 fin, history, corp_code).
+
+    ⚠️ 보고서별 손익 기준이 다르다(사업=연간, 분기/반기=기간).
+    최신이 분기/반기면 기간 항목을 TTM(직전 연간 + 당기 누적 − 전년 동기 누적)으로
+    변환하고, 재료가 없으면 직전 연간으로 폴백한다(metrics.build_ttm).
+    """
     # 최신 보고서 우선순위: 올해/작년 분기·반기·사업 순으로 가장 최근 것
     today = dt.date.today()
     candidates = []
     for y in (today.year, today.year - 1):
         for r in (dart.REPRT_Q3, dart.REPRT_HALF, dart.REPRT_Q1, dart.REPRT_ANNUAL):
             candidates.append((y, r))
-    latest = None
+    latest, latest_year, latest_reprt = None, None, None
     for y, r in candidates:
         path = f"financials/{y}_{r}.parquet"
         if storage.exists(path):
             latest = storage.read_parquet(path)
+            latest_year, latest_reprt = y, r
             break
     if latest is None:
         raise RuntimeError("no quarterly financials in storage — run_quarterly first")
 
-    fin_by_ticker: dict[str, dict] = {}
-    corp_by_ticker: dict[str, str] = {}
-    for _, row in latest.iterrows():
-        d = row.to_dict()
-        d["flags"] = d.get("flags", "").split(";") if d.get("flags") else []
-        d = {k: (None if pd.isna(v) else v) if not isinstance(v, list) else v
-             for k, v in d.items()}
-        fin_by_ticker[d["ticker"]] = d
-        corp_by_ticker[d["ticker"]] = d.get("corp_code")
+    fin_by_ticker = _df_to_fins(latest)
+    corp_by_ticker = {t: d.get("corp_code") for t, d in fin_by_ticker.items()}
+
+    if latest_reprt != dart.REPRT_ANNUAL:
+        prior_annual = _df_to_fins(storage.read_parquet(
+            f"financials/{latest_year - 1}_{dart.REPRT_ANNUAL}.parquet"))
+        prior_same = _df_to_fins(storage.read_parquet(
+            f"financials/{latest_year - 1}_{latest_reprt}.parquet"))
+        fin_by_ticker = {t: metrics.build_ttm(f, prior_annual.get(t), prior_same.get(t))
+                         for t, f in fin_by_ticker.items()}
+        print(f"[trigger_a] flow basis: TTM ({latest_year}_{latest_reprt} 기준)")
 
     history_by_ticker: dict[str, list[dict]] = {t: [] for t in fin_by_ticker}
     for y in range(today.year - 6, today.year):

@@ -41,6 +41,7 @@ def _load_universe() -> tuple[dict[str, dict], dict[str, list[dict]]]:
     df["bsns_year"] = df["bsns_year"].astype(int)
     latest_rows: dict[str, dict] = {}
     history: dict[str, list[dict]] = {}
+    all_rows: dict[tuple, dict] = {}                      # (ticker, year, reprt) → fin
     order = {"11011": 0, "11013": 1, "11012": 2, "11014": 3}   # 연내 시간 순
     df = df.sort_values(["ticker", "bsns_year", "reprt"],
                         key=lambda s: s.map(order) if s.name == "reprt" else s)
@@ -48,12 +49,21 @@ def _load_universe() -> tuple[dict[str, dict], dict[str, list[dict]]]:
         d = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
         d["flags"] = d["flags"].split(";") if d.get("flags") else []
         t = d["ticker"]
+        all_rows[(t, d["bsns_year"], d["reprt"])] = d
         latest_rows[t] = d                                # 정렬상 마지막이 최신
         if d["reprt"] == "11011":
             history.setdefault(t, []).append(d)
     for t in history:
         if history[t] and latest_rows[t] is history[t][-1]:
             history[t] = history[t][:-1]                  # 최신 연간이 latest면 중복 제거
+
+    # 보고서 기준 불일치 보정: 최신이 분기/반기면 기간 항목을 TTM으로 변환
+    for t, d in list(latest_rows.items()):
+        if d["reprt"] != "11011":
+            y = d["bsns_year"]
+            latest_rows[t] = metrics.build_ttm(
+                d, all_rows.get((t, y - 1, "11011")),
+                all_rows.get((t, y - 1, d["reprt"])))
     return latest_rows, history
 
 

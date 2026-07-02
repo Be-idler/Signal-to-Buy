@@ -13,11 +13,51 @@ from __future__ import annotations
 import io
 import json
 import os
+import socket
+import ssl
+import time
 
 import config
 
 _service_cache = None
 _folder_cache: dict[str, str] = {}
+
+_RETRY_STATUS = (429, 500, 502, 503, 504)
+
+
+def _execute(request, retries: int = 5):
+    """Drive API 요청 실행 + 재시도.
+
+    장시간 배치(분기 적재) 중 발생하는 일시 오류에 대비한다:
+    - 429/5xx, 403 rate limit → 지수 백오프 재시도
+    - SSL/소켓 끊김 → 재시도
+    - 401(토큰 문제) → 서비스 재생성(토큰 refresh) 후 재시도
+    비일시적 오류(권한 등)는 즉시 raise.
+    """
+    global _service_cache
+    try:
+        from googleapiclient.errors import HttpError
+    except ImportError:                          # 테스트 환경(미설치) 폴백
+        class HttpError(Exception):
+            resp = None
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return request.execute(num_retries=2)   # 클라이언트 자체 재시도 포함
+        except HttpError as e:
+            status = e.resp.status if e.resp is not None else None
+            reason = str(e).lower()
+            if status in _RETRY_STATUS or (status == 403 and "ratelimit" in reason):
+                last_err = e
+            elif status == 401:
+                _service_cache = None               # 토큰 만료 → 서비스 재생성
+                last_err = e
+            else:
+                raise
+        except (ssl.SSLError, socket.timeout, ConnectionError, OSError) as e:
+            last_err = e
+        time.sleep(min(2.0 * (2 ** attempt), 60.0))
+    raise RuntimeError(f"Drive API failed after {retries} retries: {last_err}") from last_err
 
 
 def _service():
@@ -45,8 +85,8 @@ def _find_child(parent_id: str, name: str, folder: bool | None = None) -> str | 
     q = f"'{parent_id}' in parents and name='{_escape(name)}' and trashed=false"
     if folder is True:
         q += " and mimeType='application/vnd.google-apps.folder'"
-    resp = _service().files().list(q=q, fields="files(id,mimeType)",
-                                   pageSize=5).execute()
+    resp = _execute(_service().files().list(q=q, fields="files(id,mimeType)",
+                                            pageSize=5))
     files = resp.get("files", [])
     return files[0]["id"] if files else None
 
@@ -64,7 +104,7 @@ def _resolve_folder(path_parts: list[str], create: bool = True) -> str | None:
                 return None
             meta = {"name": part, "mimeType": "application/vnd.google-apps.folder",
                     "parents": [parent]}
-            found = _service().files().create(body=meta, fields="id").execute()["id"]
+            found = _execute(_service().files().create(body=meta, fields="id"))["id"]
         parent = found
     _folder_cache[key] = parent
     return parent
@@ -84,11 +124,11 @@ def upload_bytes(data: bytes, remote_path: str,
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
     existing = _find_child(parent, name)
     if existing:
-        _service().files().update(fileId=existing, media_body=media).execute()
+        _execute(_service().files().update(fileId=existing, media_body=media))
         return existing
     meta = {"name": name, "parents": [parent]}
-    return _service().files().create(body=meta, media_body=media,
-                                     fields="id").execute()["id"]
+    return _execute(_service().files().create(body=meta, media_body=media,
+                                              fields="id"))["id"]
 
 
 def download_bytes(remote_path: str) -> bytes | None:
@@ -105,7 +145,7 @@ def download_bytes(remote_path: str) -> bytes | None:
     downloader = MediaIoBaseDownload(buf, _service().files().get_media(fileId=fid))
     done = False
     while not done:
-        _, done = downloader.next_chunk()
+        _, done = downloader.next_chunk(num_retries=3)
     return buf.getvalue()
 
 
@@ -160,10 +200,10 @@ def sync_prefix_to_local(prefix: str, local_dir: str | None = None) -> list[str]
     paths: list[str] = []
     page_token = None
     while True:
-        resp = _service().files().list(
+        resp = _execute(_service().files().list(
             q=f"'{folder_id}' in parents and trashed=false",
             fields="nextPageToken,files(id,name,mimeType)",
-            pageSize=200, pageToken=page_token).execute()
+            pageSize=200, pageToken=page_token))
         for f in resp.get("files", []):
             if f["mimeType"] == "application/vnd.google-apps.folder":
                 continue
@@ -172,7 +212,7 @@ def sync_prefix_to_local(prefix: str, local_dir: str | None = None) -> list[str]
             dl = MediaIoBaseDownload(buf, _service().files().get_media(fileId=f["id"]))
             done = False
             while not done:
-                _, done = dl.next_chunk()
+                _, done = dl.next_chunk(num_retries=3)
             with open(local_path, "wb") as fh:
                 fh.write(buf.getvalue())
             paths.append(local_path)

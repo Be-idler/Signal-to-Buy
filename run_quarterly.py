@@ -20,12 +20,14 @@ import pandas as pd
 
 from dhandho import dart, notify, storage
 
-FIN_COLUMNS = ["ticker", "corp_code", "revenue", "operating_income", "gross_profit",
-               "net_income", "net_income_controlling", "total_assets",
-               "total_liabilities", "total_equity", "equity_controlling",
-               "current_assets", "current_liabilities", "cash_and_equivalents",
-               "short_term_investments", "total_borrowings", "ppe", "cfo", "capex",
-               "interest_expense", "depreciation", "fs_div", "flags"]
+FIN_COLUMNS = (["ticker", "corp_code", "revenue", "operating_income", "gross_profit",
+                "net_income", "net_income_controlling", "total_assets",
+                "total_liabilities", "total_equity", "equity_controlling",
+                "current_assets", "current_liabilities", "cash_and_equivalents",
+                "short_term_investments", "total_borrowings", "ppe", "cfo", "capex",
+                "interest_expense", "depreciation", "fs_div", "flags"]
+               # 분기/반기 누적치 — TTM(직전 12개월) 계산용 (dart.FLOW_KEYS)
+               + [f"{k}_cum" for k in dart.FLOW_KEYS])
 
 
 def _row(ticker: str, corp_code: str, fin: dict) -> dict:
@@ -79,12 +81,18 @@ def main() -> int:
     reprt = sys.argv[2] if len(sys.argv) > 2 else dart.REPRT_ANNUAL
     try:
         collect(year, reprt)
-        # 다년 지표용 과거 사업보고서 백필 (없는 연도만)
         if reprt == dart.REPRT_ANNUAL:
+            # 다년 지표용 과거 사업보고서 백필 (없는 연도만)
             for y in range(year - 5, year):
                 if not storage.exists(f"financials/{y}_{dart.REPRT_ANNUAL}.parquet"):
                     print(f"[quarterly] backfilling {y} annual")
                     collect(y, dart.REPRT_ANNUAL)
+        else:
+            # 분기/반기: TTM 계산에 직전 연간 + 전년 동기 보고서가 필요
+            for y2, r2 in ((year - 1, dart.REPRT_ANNUAL), (year - 1, reprt)):
+                if not storage.exists(f"financials/{y2}_{r2}.parquet"):
+                    print(f"[quarterly] backfilling {y2}_{r2} for TTM")
+                    collect(y2, r2)
         return 0
     except Exception:
         notify.notify_failure("run_quarterly", traceback.format_exc())

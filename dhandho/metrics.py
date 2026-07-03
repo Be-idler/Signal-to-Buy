@@ -48,6 +48,44 @@ def _slope(values: list[float]) -> float | None:
     return raw / scale if scale > 0 else None
 
 
+def build_ttm(fin_interim: dict, prior_annual: dict | None,
+              prior_same_interim: dict | None) -> dict:
+    """분기/반기 보고서의 기간 항목을 TTM(직전 12개월)으로 변환.
+
+    TTM = 직전 연간 + 당기 누적 − 전년 동기 누적.
+    - BS(시점 잔액) 항목은 최신 보고서 값을 그대로 유지(가장 신선).
+    - 누적치(*_cum)가 없으면 thstrm 값을 누적으로 간주(1분기는 동일,
+      반기는 실데이터 검증 대상 — validate_dart.py로 확인).
+    - 세 조각 중 하나라도 없으면 직전 연간으로 폴백 + 플래그
+      (3개월치를 연간 지표에 그대로 쓰는 왜곡 방지).
+    """
+    from dhandho.dart import FLOW_KEYS
+    out = dict(fin_interim)
+    flags = list(fin_interim.get("flags", []))
+
+    def _cum(fin: dict | None, key: str):
+        if fin is None:
+            return None
+        return fin.get(key + "_cum", fin.get(key))
+
+    for key in FLOW_KEYS:
+        cur = _cum(fin_interim, key)
+        ann = (prior_annual or {}).get(key)
+        prev = _cum(prior_same_interim, key)
+        if None not in (cur, ann, prev):
+            out[key] = ann + cur - prev
+        elif ann is not None:
+            out[key] = ann                       # 연간 폴백 — 왜곡보다 낫다
+            flags.append(f"{key}_ttm_fallback_annual")
+        else:
+            out[key] = None                      # 기간 불일치 값 사용 금지
+            flags.append(f"{key}_flow_basis_mismatch")
+
+    out["flags"] = sorted(set(flags))
+    out["flow_basis"] = "TTM"
+    return out
+
+
 def compute_derived(fin: dict, mktcap: float | None = None,
                     history: list[dict] | None = None,
                     closes: list[float] | None = None) -> dict:

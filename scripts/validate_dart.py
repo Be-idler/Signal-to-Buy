@@ -67,6 +67,18 @@ def main() -> int:
                   "debt_ratio", "interest_coverage", "roc_greenblatt"):
             print(f"    {k} = {m.get(k)}")
 
+        # 분기보고서 손익 기준 실측: thstrm(3개월) vs thstrm_add(누적) — TTM 검증용
+        q1_rows = dart.get_financials(corp, year + 1, dart.REPRT_Q1)
+        if q1_rows:
+            print(f"  [1분기보고서 {year + 1}] 손익 기준 실측 (thstrm vs 누적):")
+            for r in q1_rows:
+                nm = (r.get("account_nm") or "").replace(" ", "")
+                if nm in ("매출액", "영업이익", "영업수익") and r.get("sj_div") in ("IS", "CIS"):
+                    print(f"    - {r.get('account_nm')}: thstrm={r.get('thstrm_amount')} "
+                          f"/ add(누적)={r.get('thstrm_add_amount')}")
+        else:
+            print(f"  [1분기보고서 {year + 1}] 데이터 없음")
+
         end = dt.date.today().strftime("%Y%m%d")
         bgn = (dt.date.today() - dt.timedelta(days=60)).strftime("%Y%m%d")
         disc = dart.get_recent_disclosures(corp, bgn, end)

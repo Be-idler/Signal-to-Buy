@@ -5,6 +5,7 @@ token.json
 
 # 로컬 캐시·산출물
 .cache/
+.continue_needed
 *.parquet
 __pycache__/
 *.pyc

@@ -13,10 +13,14 @@ on:
         required: true
         default: "11011"
 
+permissions:
+  contents: read
+  actions: write        # self-continuation: 시간 예산 소진 시 새 런 재발행
+
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 350          # 파이썬은 MAX_RUNTIME_MIN(320분)에 먼저 자체 종료
     env:
       DART_API_KEY: ${{ secrets.DART_API_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -32,3 +36,15 @@ jobs:
       - name: Restore Google Drive token
         run: echo "${{ secrets.GDRIVE_TOKEN_JSON_B64 }}" | base64 -d > token.json
       - run: python run_quarterly.py ${{ github.event.inputs.year }} ${{ github.event.inputs.reprt_code }}
+      - name: Self-continue (시간 예산 소진 시 새 런 재발행)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f .continue_needed ]; then
+            echo "time budget reached — dispatching continuation run"
+            gh workflow run quarterly.yml --ref main \
+              -f year=${{ github.event.inputs.year }} \
+              -f reprt_code=${{ github.event.inputs.reprt_code }} \
+              -R ${{ github.repository }}
+          fi

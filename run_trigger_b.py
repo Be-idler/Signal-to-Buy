@@ -54,7 +54,8 @@ def main() -> int:
             return 0
         finalists: dict = ckpt.get("finalists") or {}
         if not finalists:
-            notify.send_bot1(f"📭 {date_str} 단도 트랙: 정량 게이트 통과 종목 없음")
+            notify.send_bot1(notify.header_daily(date_str)
+                             + "\n정량 게이트 통과 종목 없음")
             return 0
 
         # ⑤ 배치 결과 수신 (미완료 시 대기·재시도)
@@ -67,9 +68,9 @@ def main() -> int:
                 if status == "ended":
                     break
                 if time.time() > deadline:
-                    notify.send_bot1(
-                        f"⏳ {date_str} LLM 배치 미완료(status={status}) — "
-                        f"정성 미반영(2.5 캡) 신호로 대체 발송")
+                    notify.send_bot1(notify.header_system(
+                        f"{notify.fmt_date(date_str)} LLM 배치 미완료(status={status}) — "
+                        f"정성 미반영(2.5 캡) 신호로 대체 발송"))
                     break
                 time.sleep(POLL_INTERVAL)
 
@@ -93,14 +94,15 @@ def main() -> int:
                 digest_rows.append(_format_digest_row(ticker, entry, decision,
                                                       qual, entry["metrics"]))
 
-        header = f"📊 단도 일일 신호 {date_str} — 최종 판단은 사람"
+        header = notify.header_daily(date_str) + "\n※ 최종 판단은 사람"
         if buys:
             notify.send_bot1("\n\n".join([header] + buys))
         elif digest_rows:
             notify.send_bot1("\n\n".join(
                 [header + "\n(BUY 0건 — 그라운딩 숏리스트 폴백)"] + digest_rows))
         else:
-            notify.send_bot1(f"📭 {date_str} 단도 트랙: BUY 0건, 그라운딩 종목 없음")
+            notify.send_bot1(notify.header_daily(date_str)
+                             + "\nBUY 0건, 그라운딩 종목 없음")
         print(f"[trigger_b] BUY {len(buys)} / digest {len(digest_rows)}")
         return 0
     except Exception:

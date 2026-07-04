@@ -140,7 +140,7 @@ def main() -> int:
                     print(f"[quarterly] backfilling {y2}_{r2} for TTM")
                     if not collect(y2, r2):
                         return _pause_for_continuation()
-        notify.send_bot1(f"✅ 분기 적재 완료: {year}_{reprt} (+백필)")
+        notify.send_bot1(notify.header_system(f"분기 적재 완료: {year}_{reprt} (+백필)"))
         return 0
     except SystemExit:
         raise

@@ -1,0 +1,35 @@
+# 질의응답 — 특정 종목 × 투자스킴 온디맨드 분석 (🔎 헤더로 텔레그램 발송)
+name: query
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticker:
+        description: "종목코드 6자리 (예: 005930)"
+        required: true
+      framework:
+        description: "투자스킴"
+        required: true
+        type: choice
+        options: [dhandho, ltgg, outsiders, buffett, magic_formula]
+        default: dhandho
+
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+      GDRIVE_TOKEN_FILE: token.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Restore Google Drive token
+        run: echo "${{ secrets.GDRIVE_TOKEN_JSON_B64 }}" | base64 -d > token.json
+      - run: python run_query.py ${{ github.event.inputs.ticker }} ${{ github.event.inputs.framework }}

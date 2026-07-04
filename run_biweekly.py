@@ -103,8 +103,9 @@ def main() -> int:
             metrics_all[t] = metrics.compute_derived(fin, mktcap=mktcap,
                                                      history=history.get(t) or None)
 
-        parts = [f"🗂 다관점 격주 랭킹 {date_str} (유니버스 {len(metrics_all)}종목)",
-                 "※ 관점별 독립 점수 — 평균·합산 금지(§6). 미검증 임계, 판단은 사람."]
+        parts = [notify.header_biweekly(date_str)
+                 + f"\n유니버스 {len(metrics_all)}종목"
+                 + "\n※ 관점별 독립 점수 — 평균·합산 금지(§6). 미검증 임계, 판단은 사람."]
         scores_rows = []
         for fw in FRAMEWORKS:
             ranked = frameworks.rank_universe(metrics_all, fw, info_by_ticker=info)

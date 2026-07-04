@@ -11,6 +11,34 @@ import config
 _MAX_LEN = 4000   # 텔레그램 메시지 한도(4096)에 여유
 
 
+# ------------------------------------------------------------------ 메시지 헤더 규격
+# 봇 1개로 모든 유형을 수신하므로 헤더로 유형을 구분한다.
+def fmt_date(yyyymmdd: str) -> str:
+    """YYYYMMDD → YYYY-MM-DD (이미 하이픈 있으면 그대로)."""
+    s = str(yyyymmdd)
+    return f"{s[:4]}-{s[4:6]}-{s[6:8]}" if len(s) == 8 and s.isdigit() else s
+
+
+def header_daily(date: str) -> str:
+    """봇1 — 일일 RSI 스크리닝."""
+    return f"📋 단도투자 RSI<30 스크리닝 {fmt_date(date)}"
+
+
+def header_biweekly(date: str) -> str:
+    """봇2 — 격주 다관점 랭킹."""
+    return f"📋 다관점 프레임워크 랭킹 {fmt_date(date)}"
+
+
+def header_system(message: str) -> str:
+    """시스템 경고."""
+    return f"⚠️ [시스템] {message}"
+
+
+def header_query(stock_name: str, scheme: str, basis_date: str) -> str:
+    """질의응답 — 온디맨드 종목×스킴 분석."""
+    return f"🔎 {stock_name} {scheme} 방식 분석 ({fmt_date(basis_date)} 기준)"
+
+
 def _send(token: str, chat_id: str, text: str) -> bool:
     if not token or not chat_id:
         print("[notify] telegram not configured; message below:\n" + text)
@@ -38,5 +66,5 @@ def send_bot2(text: str) -> bool:
 
 def notify_failure(stage: str, error: str, bot: int = 1) -> bool:
     """파이프라인 실패 통보 (멱등·실패 시 봇 통보 원칙)."""
-    text = f"⚠️ [{stage}] 파이프라인 실패\n{error[:1000]}"
+    text = header_system(f"{stage} 파이프라인 실패") + f"\n{error[:1000]}"
     return send_bot1(text) if bot == 1 else send_bot2(text)

@@ -1,6 +1,11 @@
-"""메시지 헤더 규격 테스트 — 봇 1개로 유형 구분."""
+"""메시지 헤더 규격 테스트 — 봇 1개로 유형 구분 (애드온2 §2.1)."""
 from dhandho.notify import (fmt_date, header_biweekly, header_daily,
-                            header_query, header_system)
+                            header_system)
+from dhandho.report_format import header as header_query_fn
+
+
+def header_query(name, scheme, date):
+    return header_query_fn(name, scheme, date)
 
 
 def test_fmt_date():

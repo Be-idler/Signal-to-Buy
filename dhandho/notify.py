@@ -11,8 +11,15 @@ import config
 _MAX_LEN = 4000   # 텔레그램 메시지 한도(4096)에 여유
 
 
-# ------------------------------------------------------------------ 메시지 헤더 규격
-# 봇 1개로 모든 유형을 수신하므로 헤더로 유형을 구분한다.
+# ------------------------------------------------------------------ 헤더 규약 (애드온2 §2.1)
+# 봇 1개 대화방에 자동 발신·시스템 경고·질의응답이 섞이므로 헤더로 유형을 구분한다.
+# 규칙: 발신 메시지는 반드시 아래 상수/헤더 함수를 거친다 — 호출부 즉석 문자열 금지.
+# (질의응답 HEADER_QUERY는 report_format.py 소관)
+HEADER_ALERT = "📋 단도투자 RSI<30 스크리닝"    # 봇1: 일일 신호
+HEADER_RANK = "📋 다관점 프레임워크 랭킹"        # 봇2: 격주 랭킹
+HEADER_SYSTEM = "⚠️ [시스템]"                    # 운영 경고·실패 통보
+
+
 def fmt_date(yyyymmdd: str) -> str:
     """YYYYMMDD → YYYY-MM-DD (이미 하이픈 있으면 그대로)."""
     s = str(yyyymmdd)
@@ -21,22 +28,17 @@ def fmt_date(yyyymmdd: str) -> str:
 
 def header_daily(date: str) -> str:
     """봇1 — 일일 RSI 스크리닝."""
-    return f"📋 단도투자 RSI<30 스크리닝 {fmt_date(date)}"
+    return f"{HEADER_ALERT} {fmt_date(date)}"
 
 
 def header_biweekly(date: str) -> str:
     """봇2 — 격주 다관점 랭킹."""
-    return f"📋 다관점 프레임워크 랭킹 {fmt_date(date)}"
+    return f"{HEADER_RANK} {fmt_date(date)}"
 
 
 def header_system(message: str) -> str:
     """시스템 경고."""
-    return f"⚠️ [시스템] {message}"
-
-
-def header_query(stock_name: str, scheme: str, basis_date: str) -> str:
-    """질의응답 — 온디맨드 종목×스킴 분석."""
-    return f"🔎 {stock_name} {scheme} 방식 분석 ({fmt_date(basis_date)} 기준)"
+    return f"{HEADER_SYSTEM} {message}"
 
 
 def _send(token: str, chat_id: str, text: str) -> bool:

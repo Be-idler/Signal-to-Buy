@@ -93,6 +93,52 @@ python run_trigger_b.py                     # 일일 후반부 (다음날 개장
 python run_biweekly.py                      # 격주 다관점 랭킹
 ```
 
+## 질의응답 (애드온2 — 텔레그램 인터랙티브 분석)
+
+명령 문법: `<종목명|6자리코드> <스킴> [기준일]`
+스킴: 단도(파브라이) / 베일리기포드(bg) / 버핏 / 아웃사이더(손다이크) / 린치(peg) / 애크먼
+
+```
+삼성전자 단도 2026-06-30
+005930 버핏 20260630
+비나텍 린치              ← 기준일 생략 시 최근 거래일
+```
+
+**PIT(Point-in-Time) 규율**: 기준일에 알 수 있었던 정보만 사용(룩어헤드 금지) —
+법정 제출기한이 지난 보고서만 채택하고 "재무 as-of"를 리포트에 명기.
+과거 기준일 질의는 곧 백테스트의 단위 쿼리가 된다.
+
+실행 경로 2가지 (같은 파이프라인):
+1. **GitHub 웹**: Actions → **query** → 명령 입력 → 텔레그램으로 리포트 수신
+2. **상시 수신 봇**(맥미니/랩탑): `TELEGRAM_ALLOWED_CHAT_IDS=<내 chat_id> python bot_listener.py`
+   — 봇1 토큰 재사용(발신·수신 독립), 화이트리스트 외 발신자 전면 무시.
+
+macOS launchd 등록 예 (`~/Library/LaunchAgents/com.signaltobuy.bot.plist`):
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.signaltobuy.bot</string>
+  <key>WorkingDirectory</key><string>/Users/me/Signal-to-Buy</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/bin/python3</string><string>bot_listener.py</string></array>
+  <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key><dict>
+    <key>TELEGRAM_BOT_TOKEN</key><string>...</string>
+    <key>TELEGRAM_CHAT_ID</key><string>...</string>
+    <key>TELEGRAM_ALLOWED_CHAT_IDS</key><string>...</string>
+    <key>KRX_API_KEY</key><string>...</string>
+    <key>GDRIVE_ROOT_FOLDER_ID</key><string>...</string>
+  </dict>
+</dict></plist>
+```
+등록: `launchctl load ~/Library/LaunchAgents/com.signaltobuy.bot.plist`
+(절전 해제: `caffeinate` 또는 `pmset` 확인)
+
+헤더 규약(§2.1): 자동 발신 `📋`, 시스템 `⚠️ [시스템]`, 질의응답 `🔎` —
+모든 발신은 notify/report_format의 상수·포맷터를 거친다(즉석 문자열 금지).
+
 ## v1 정렬 현황
 
 v1 구현명세서(`docs/v1_구현명세서.md`)·README(`docs/v1_README.md`) 기준으로 정렬됨:

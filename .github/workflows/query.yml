@@ -1,0 +1,31 @@
+# 질의응답 — 온디맨드 종목×스킴 분석 (🔎 HEADER_QUERY로 텔레그램 회신)
+# bot_listener(로컬 상시 프로세스)와 동일한 파이프라인의 GitHub 웹 실행 경로.
+name: query
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "명령: <종목명|코드> <스킴> [기준일] — 예: 삼성전자 단도 2026-06-30"
+        required: true
+
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+      DART_API_KEY: ${{ secrets.DART_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+      GDRIVE_TOKEN_FILE: token.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Restore Google Drive token
+        run: echo "${{ secrets.GDRIVE_TOKEN_JSON_B64 }}" | base64 -d > token.json
+      - run: python run_query.py ${{ github.event.inputs.query }}

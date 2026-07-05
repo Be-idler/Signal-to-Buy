@@ -11,6 +11,36 @@ import config
 _MAX_LEN = 4000   # 텔레그램 메시지 한도(4096)에 여유
 
 
+# ------------------------------------------------------------------ 헤더 규약 (애드온2 §2.1)
+# 봇 1개 대화방에 자동 발신·시스템 경고·질의응답이 섞이므로 헤더로 유형을 구분한다.
+# 규칙: 발신 메시지는 반드시 아래 상수/헤더 함수를 거친다 — 호출부 즉석 문자열 금지.
+# (질의응답 HEADER_QUERY는 report_format.py 소관)
+HEADER_ALERT = "📋 단도투자 RSI<30 스크리닝"    # 봇1: 일일 신호
+HEADER_RANK = "📋 다관점 프레임워크 랭킹"        # 봇2: 격주 랭킹
+HEADER_SYSTEM = "⚠️ [시스템]"                    # 운영 경고·실패 통보
+
+
+def fmt_date(yyyymmdd: str) -> str:
+    """YYYYMMDD → YYYY-MM-DD (이미 하이픈 있으면 그대로)."""
+    s = str(yyyymmdd)
+    return f"{s[:4]}-{s[4:6]}-{s[6:8]}" if len(s) == 8 and s.isdigit() else s
+
+
+def header_daily(date: str) -> str:
+    """봇1 — 일일 RSI 스크리닝."""
+    return f"{HEADER_ALERT} {fmt_date(date)}"
+
+
+def header_biweekly(date: str) -> str:
+    """봇2 — 격주 다관점 랭킹."""
+    return f"{HEADER_RANK} {fmt_date(date)}"
+
+
+def header_system(message: str) -> str:
+    """시스템 경고."""
+    return f"{HEADER_SYSTEM} {message}"
+
+
 def _send(token: str, chat_id: str, text: str) -> bool:
     if not token or not chat_id:
         print("[notify] telegram not configured; message below:\n" + text)
@@ -38,5 +68,5 @@ def send_bot2(text: str) -> bool:
 
 def notify_failure(stage: str, error: str, bot: int = 1) -> bool:
     """파이프라인 실패 통보 (멱등·실패 시 봇 통보 원칙)."""
-    text = f"⚠️ [{stage}] 파이프라인 실패\n{error[:1000]}"
+    text = header_system(f"{stage} 파이프라인 실패") + f"\n{error[:1000]}"
     return send_bot1(text) if bot == 1 else send_bot2(text)

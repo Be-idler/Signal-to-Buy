@@ -20,6 +20,11 @@ TELEGRAM_BOT2_CHAT_ID = os.environ.get("TELEGRAM_BOT2_CHAT_ID", _TG_CHAT)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
+# 질의응답 봇 보안(애드온2 §2): 허가된 chat_id만 응답. 콤마 구분.
+TELEGRAM_ALLOWED_CHAT_IDS = [s.strip() for s in
+                             os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "").split(",")
+                             if s.strip()]
+
 # Google Drive 저장 백엔드 (운영자 사전 준비 필요 — README 참조)
 GDRIVE_CLIENT_SECRETS = os.environ.get("GDRIVE_CLIENT_SECRETS", "client_secret.json")
 GDRIVE_TOKEN_FILE = os.environ.get("GDRIVE_TOKEN_FILE", "token.json")

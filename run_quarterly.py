@@ -2,9 +2,13 @@
 
 ⚠️ 시총은 저장하지 않는다(mktcap=None). 시총 결합은 트리거 A(일일)에서 수행.
 
-사용: python run_quarterly.py <year> <reprt_code>
+사용:
+  python run_quarterly.py <year> <reprt_code>            # 전수 적재
+  python run_quarterly.py <year> <reprt_code> --recollect  # 누락 종목만 재수집
+  python run_quarterly.py <year> <reprt_code> --repair <종목코드...>  # 지정 종목 보강
   reprt_code: 11011(사업) 11012(반기) 11013(1분기) 11014(3분기)
   예) python run_quarterly.py 2025 11011
+     python run_quarterly.py 2025 11011 --recollect
 
 - 체크포인트: checkpoints/quarterly_{year}_{reprt}.json (중단 지점 재개)
 - 산출: financials/{year}_{reprt}.parquet (정규화 SSOT, ticker 단위 1행)
@@ -63,8 +67,8 @@ def _fetch_one(ticker: str, corp: str, year: int, reprt_code: str):
         return ticker, corp, None, e
 
 
-def collect(year: int, reprt_code: str) -> bool:
-    """전 종목 수집. 반환: True=완료, False=시간 예산 소진으로 일시 중단."""
+def collect(year: int, reprt_code: str) -> int | None:
+    """전 종목 수집. 반환: 적재 종목 수(완료), None=시간 예산 소진으로 일시 중단."""
     ckpt_path = f"checkpoints/quarterly_{year}_{reprt_code}.json"
     ckpt = storage.load_json(ckpt_path) or {"done": [], "rows": []}
     done = set(ckpt["done"])
@@ -81,7 +85,7 @@ def collect(year: int, reprt_code: str) -> bool:
                 storage.save_json(ckpt, ckpt_path)
                 print(f"[quarterly] time budget ({MAX_RUNTIME_MIN}min) reached — "
                       f"checkpoint saved, will self-continue")
-                return False
+                return None
             chunk = todo[i:i + CHUNK]
             results = ex.map(lambda tc: _fetch_one(tc[0], tc[1], year, reprt_code),
                              chunk)
@@ -109,7 +113,7 @@ def collect(year: int, reprt_code: str) -> bool:
     storage.upload_parquet(df, f"financials/{year}_{reprt_code}.parquet")
     storage.save_json({"done": sorted(done), "rows": []}, ckpt_path)   # 완료 표시(행 비움)
     print(f"[quarterly] uploaded financials/{year}_{reprt_code}.parquet ({len(df)} rows)")
-    return True
+    return len(df)
 
 
 def repair_missing(year: int, reprt_code: str, tickers: list[str]) -> None:
@@ -151,6 +155,86 @@ def repair_missing(year: int, reprt_code: str, tickers: list[str]) -> None:
     print(f"[repair] {path} 갱신 완료 (총 {len(merged)}행, 신규/갱신 {len(new_rows)}건)")
 
 
+def recollect_missing(year: int, reprt_code: str) -> None:
+    """이미 업로드된 보고서 SSOT에서 누락된 종목을 자동 탐지해 재수집한다.
+
+    전수 적재는 개별 종목이 일시 오류를 만나면 그 보고서에서 영구 제외되는
+    구조라(재개 시 done 처리됨), 네트워크가 불안정하면 소수 종목이 조용히
+    빠질 수 있다. 이 모드는 상장 유니버스(corp_codes)와 적재된 parquet을
+    비교해 빠진 종목만 다시 수집한다.
+
+    - 안전성: 새로 받은 종목의 행만 교체/추가하고 기존 데이터는 보존한다.
+    - 무자료 캐시: DART가 '자료 없음'을 확정한 종목(비상장 전환·미제출 등)은
+      recollect_empty_{year}_{reprt}.json에 기록해, 반복 실행 시 재조회를
+      건너뛴다(누락≠무자료 구분). 일시 오류로 실패한 종목은 캐시에 넣지
+      않으므로 다음 실행에서 다시 시도된다.
+    - 재개: 매 청크마다 병합·업로드하고 누락 집합을 현재 parquet 기준으로
+      다시 계산하므로, 시간 예산·일일 한도로 중단돼도 재실행하면 남은
+      누락분만 이어서 채운다.
+    """
+    path = f"financials/{year}_{reprt_code}.parquet"
+    empty_path = f"checkpoints/recollect_empty_{year}_{reprt_code}.json"
+    df = storage.read_parquet(path)
+    if df is None:
+        raise RuntimeError(f"[recollect] {path} 없음 — 먼저 전체 적재가 필요합니다")
+
+    corp_codes = dart.get_corp_codes()
+    present = set(df["ticker"].astype(str))
+    empty = set(storage.load_json(empty_path) or [])
+    missing = [(t, corp_codes[t]) for t in sorted(corp_codes)
+               if t not in present and t not in empty]
+    print(f"[recollect] {year}_{reprt_code}: 유니버스 {len(corp_codes)}, "
+          f"적재 {len(present)}, 무자료 캐시 {len(empty)}, 재수집 대상 {len(missing)}")
+    if not missing:
+        notify.send_bot1(notify.header_system(
+            f"누락 재수집: {year}_{reprt_code} — 재수집 대상 없음 (총 {len(present)}종목)"))
+        return
+
+    added = 0
+    CHUNK = 200
+    with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        for i in range(0, len(missing), CHUNK):
+            if not _time_left():
+                print("[recollect] 시간 예산 소진 — 재실행 시 남은 누락분 이어서 재수집")
+                break
+            chunk = missing[i:i + CHUNK]
+            results = ex.map(lambda tc: _fetch_one(tc[0], tc[1], year, reprt_code),
+                             chunk)
+            new_rows, new_empty, daily_limit = [], [], False
+            for ticker, corp, fin, err in results:
+                if err is not None:
+                    if "daily limit" in str(err):
+                        daily_limit = True
+                    else:
+                        print(f"[recollect] {ticker} failed: {err}")
+                    continue                 # 일시 오류 → 캐시 안 함(다음 실행 재시도)
+                if fin is not None:
+                    new_rows.append(_row(ticker, corp, fin))
+                else:
+                    new_empty.append(ticker)   # DART 무자료 확정 → 캐시
+            if new_rows:
+                fixed = {r["ticker"] for r in new_rows}
+                df = pd.concat(
+                    [df[~df["ticker"].isin(fixed)],
+                     pd.DataFrame(new_rows, columns=FIN_COLUMNS)], ignore_index=True)
+                storage.upload_parquet(df, path)
+                added += len(new_rows)
+            if new_empty:
+                empty |= set(new_empty)
+                storage.save_json(sorted(empty), empty_path)
+            print(f"[recollect] progress {min(i + CHUNK, len(missing))}/{len(missing)} "
+                  f"(추가 누적 {added}, 무자료 캐시 {len(empty)})")
+            if daily_limit:
+                notify.notify_failure(
+                    "run_quarterly",
+                    f"DART 일일 한도 초과(recollect {year}_{reprt_code}) — 여기까지 "
+                    f"저장됨. 내일 재실행하면 남은 누락분 이어서 재수집")
+                sys.exit(0)
+
+    notify.send_bot1(notify.header_system(
+        f"누락 재수집 완료: {year}_{reprt_code} — {added}종목 추가, 총 {len(df)}종목 적재"))
+
+
 def _pause_for_continuation() -> int:
     """시간 예산 소진 — 마커를 남기고 정상 종료(워크플로가 새 런 재발행)."""
     with open(CONTINUE_MARKER, "w") as fh:
@@ -162,27 +246,39 @@ def _pause_for_continuation() -> int:
 def main() -> int:
     year = int(sys.argv[1])
     reprt = sys.argv[2] if len(sys.argv) > 2 else dart.REPRT_ANNUAL
-    if len(sys.argv) > 3 and sys.argv[3] == "--repair":
+    mode = sys.argv[3] if len(sys.argv) > 3 else ""
+    if mode == "--repair":
         repair_missing(year, reprt, sys.argv[4:])
         return 0
+    if mode == "--recollect":
+        recollect_missing(year, reprt)
+        return 0
     try:
-        if not collect(year, reprt):
+        counts: dict[str, int] = {}
+        n = collect(year, reprt)
+        if n is None:
             return _pause_for_continuation()
+        counts[f"{year}_{reprt}"] = n
         if reprt == dart.REPRT_ANNUAL:
             # 다년 지표용 과거 사업보고서 백필 (없는 연도만)
             for y in range(year - 5, year):
                 if not storage.exists(f"financials/{y}_{dart.REPRT_ANNUAL}.parquet"):
                     print(f"[quarterly] backfilling {y} annual")
-                    if not collect(y, dart.REPRT_ANNUAL):
+                    n = collect(y, dart.REPRT_ANNUAL)
+                    if n is None:
                         return _pause_for_continuation()
+                    counts[f"{y}_{dart.REPRT_ANNUAL}"] = n
         else:
             # 분기/반기: TTM 계산에 직전 연간 + 전년 동기 보고서가 필요
             for y2, r2 in ((year - 1, dart.REPRT_ANNUAL), (year - 1, reprt)):
                 if not storage.exists(f"financials/{y2}_{r2}.parquet"):
                     print(f"[quarterly] backfilling {y2}_{r2} for TTM")
-                    if not collect(y2, r2):
+                    n = collect(y2, r2)
+                    if n is None:
                         return _pause_for_continuation()
-        notify.send_bot1(notify.header_system(f"분기 적재 완료: {year}_{reprt} (+백필)"))
+                    counts[f"{y2}_{r2}"] = n
+        summary = ", ".join(f"{k} {v:,}종목" for k, v in counts.items())
+        notify.send_bot1(notify.header_system(f"분기 적재 완료: {summary}"))
         return 0
     except SystemExit:
         raise

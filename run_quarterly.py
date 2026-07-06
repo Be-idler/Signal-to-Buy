@@ -112,6 +112,45 @@ def collect(year: int, reprt_code: str) -> bool:
     return True
 
 
+def repair_missing(year: int, reprt_code: str, tickers: list[str]) -> None:
+    """이미 업로드된 보고서 SSOT에서 특정 종목만 빠졌을 때 안전하게 보강한다.
+
+    collect()는 완료 후 체크포인트 rows를 비우므로, 그 상태에서 일부 종목만
+    다시 collect()하면 업로드 시 전체 파일이 새로 수집한 소수 행으로
+    덮어써져 기존 데이터가 유실된다. repair_missing은 기존 parquet 전체를
+    읽어 대상 종목의 행만 교체/추가한 뒤 병합본을 재업로드해 이를 피한다.
+    """
+    path = f"financials/{year}_{reprt_code}.parquet"
+    df = storage.read_parquet(path)
+    if df is None:
+        raise RuntimeError(f"[repair] {path} 없음 — 먼저 전체 적재가 필요합니다")
+
+    corp_codes = dart.get_corp_codes()
+    new_rows = []
+    for t in tickers:
+        corp = corp_codes.get(t)
+        if corp is None:
+            print(f"[repair] {t}: corp_code 없음 — 스킵")
+            continue
+        rows = dart.get_financials(corp, year, reprt_code)
+        if not rows:
+            print(f"[repair] {t}: DART 응답에 재무 행 없음 — 스킵(미공시 가능)")
+            continue
+        fin = dart.normalize_financials(rows)
+        new_rows.append(_row(t, corp, fin))
+        print(f"[repair] {t}: 수집 완료")
+
+    if not new_rows:
+        print("[repair] 추가/갱신할 데이터 없음")
+        return
+
+    new_df = pd.DataFrame(new_rows, columns=FIN_COLUMNS)
+    fixed = {r["ticker"] for r in new_rows}
+    merged = pd.concat([df[~df["ticker"].isin(fixed)], new_df], ignore_index=True)
+    storage.upload_parquet(merged, path)
+    print(f"[repair] {path} 갱신 완료 (총 {len(merged)}행, 신규/갱신 {len(new_rows)}건)")
+
+
 def _pause_for_continuation() -> int:
     """시간 예산 소진 — 마커를 남기고 정상 종료(워크플로가 새 런 재발행)."""
     with open(CONTINUE_MARKER, "w") as fh:
@@ -123,6 +162,9 @@ def _pause_for_continuation() -> int:
 def main() -> int:
     year = int(sys.argv[1])
     reprt = sys.argv[2] if len(sys.argv) > 2 else dart.REPRT_ANNUAL
+    if len(sys.argv) > 3 and sys.argv[3] == "--repair":
+        repair_missing(year, reprt, sys.argv[4:])
+        return 0
     try:
         if not collect(year, reprt):
             return _pause_for_continuation()

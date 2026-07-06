@@ -1,4 +1,5 @@
 """run_quarterly의 병렬 수집·체크포인트 재개·시간 예산 중단 로직 테스트."""
+import pandas as pd
 import pytest
 
 import run_quarterly
@@ -17,6 +18,9 @@ class _MemStorage:
 
     def upload_parquet(self, df, path):
         self.parquet[path] = df
+
+    def read_parquet(self, path):
+        return self.parquet.get(path)
 
     def exists(self, path):
         return path in self.parquet
@@ -78,3 +82,30 @@ def test_individual_failure_isolated(env, monkeypatch):
     assert run_quarterly.collect(2025, "11011") is True
     df = env.parquet["financials/2025_11011.parquet"]
     assert set(df["ticker"]) == {"000010", "000030"}          # 실패 종목만 제외
+
+
+def test_repair_missing_preserves_existing_rows(env):
+    # 완료된 보고서: 체크포인트 rows는 비어 있고 parquet에 기존 2종목만 존재
+    # (047050에 해당하는 000030이 원래 적재 시 누락된 상황을 재현)
+    env.parquet["financials/2025_11011.parquet"] = pd.DataFrame(
+        [{"ticker": "000010", "revenue": 100.0},
+         {"ticker": "000020", "revenue": 200.0}], columns=run_quarterly.FIN_COLUMNS)
+    run_quarterly.repair_missing(2025, "11011", ["000030"])
+    df = env.parquet["financials/2025_11011.parquet"]
+    assert set(df["ticker"]) == {"000010", "000020", "000030"}  # 기존 2종목 보존 + 신규 추가
+    assert df.set_index("ticker").loc["000010", "revenue"] == 100.0
+    assert df.set_index("ticker").loc["000020", "revenue"] == 200.0
+
+
+def test_repair_missing_replaces_existing_ticker_row(env):
+    env.parquet["financials/2025_11011.parquet"] = pd.DataFrame(
+        [{"ticker": "000010", "revenue": 999.0}], columns=run_quarterly.FIN_COLUMNS)
+    run_quarterly.repair_missing(2025, "11011", ["000010"])   # 재수집으로 교체
+    df = env.parquet["financials/2025_11011.parquet"]
+    assert len(df) == 1
+    assert df.iloc[0]["revenue"] == 100.0                     # get_financials 픽스처 값
+
+
+def test_repair_missing_requires_existing_report(env):
+    with pytest.raises(RuntimeError, match="먼저 전체 적재"):
+        run_quarterly.repair_missing(2025, "99999", ["000010"])

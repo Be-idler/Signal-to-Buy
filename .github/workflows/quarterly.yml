@@ -12,6 +12,10 @@ on:
         description: "11011(사업) 11012(반기) 11013(1분기) 11014(3분기)"
         required: true
         default: "11011"
+      repair_tickers:
+        description: "보강 모드(선택): 이미 적재된 보고서에서 누락된 종목코드만 안전하게 채워 넣음(공백 구분, 예: 047050). 비워두면 평소처럼 전수 적재."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -35,9 +39,16 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Restore Google Drive token
         run: echo "${{ secrets.GDRIVE_TOKEN_JSON_B64 }}" | base64 -d > token.json
-      - run: python run_quarterly.py ${{ github.event.inputs.year }} ${{ github.event.inputs.reprt_code }}
+      - name: Collect (전수 적재 또는 보강)
+        run: |
+          if [ -n "${{ github.event.inputs.repair_tickers }}" ]; then
+            python run_quarterly.py ${{ github.event.inputs.year }} ${{ github.event.inputs.reprt_code }} \
+              --repair ${{ github.event.inputs.repair_tickers }}
+          else
+            python run_quarterly.py ${{ github.event.inputs.year }} ${{ github.event.inputs.reprt_code }}
+          fi
       - name: Self-continue (시간 예산 소진 시 새 런 재발행)
-        if: success()
+        if: success() && github.event.inputs.repair_tickers == ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import io
+import threading
 import time
 import zipfile
 import xml.etree.ElementTree as ET
@@ -20,6 +21,7 @@ import requests
 import config
 
 BASE = "https://opendart.fss.or.kr/api"
+_CORP_CODES_TIMEOUT_SEC = 90
 
 # 보고서 코드 (12월 결산 기준)
 REPRT_ANNUAL = "11011"   # 사업보고서
@@ -50,8 +52,7 @@ def _get(path: str, retries: int = 3, **params) -> dict:
     raise RuntimeError(f"DART request failed after {retries} retries: {last_err}")
 
 
-def get_corp_codes() -> dict[str, str]:
-    """{stock_code(6자리): corp_code(8자리)} — 상장사만 반환."""
+def _fetch_corp_codes_once() -> dict[str, str]:
     r = requests.get(f"{BASE}/corpCode.xml",
                      params={"crtfc_key": config.DART_API_KEY}, timeout=60)
     r.raise_for_status()
@@ -65,6 +66,38 @@ def get_corp_codes() -> dict[str, str]:
         if stock and corp:               # stock_code 있는 것만 = 상장사
             out[stock] = corp
     return out
+
+
+def get_corp_codes(retries: int = 3) -> dict[str, str]:
+    """{stock_code(6자리): corp_code(8자리)} — 상장사만 반환.
+
+    requests의 timeout은 연결·개별 수신 간격에만 적용되어, 대역폭이
+    낮아 데이터가 느리게라도 계속 들어오면 전체 다운로드가 무한정
+    걸릴 수 있다(전체 zip 몇 MB). 별도 스레드 + join 타임아웃으로
+    총 소요시간에 하드 상한을 둔다.
+    """
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        box: dict = {}
+
+        def _run():
+            try:
+                box["value"] = _fetch_corp_codes_once()
+            except BaseException as e:                        # noqa: BLE001
+                box["error"] = e
+
+        th = threading.Thread(target=_run, daemon=True)
+        th.start()
+        th.join(timeout=_CORP_CODES_TIMEOUT_SEC)
+        if th.is_alive():
+            last_err = TimeoutError(
+                f"corpCode.xml 다운로드가 {_CORP_CODES_TIMEOUT_SEC}초를 초과함")
+        elif "error" in box:
+            last_err = box["error"]
+        else:
+            return box["value"]
+        time.sleep(2 ** attempt)
+    raise RuntimeError(f"corp_codes 조회 실패({retries}회 재시도): {last_err}") from last_err
 
 
 def get_financials(corp_code: str, year: int, reprt_code: str = REPRT_ANNUAL,

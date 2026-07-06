@@ -58,6 +58,10 @@ def build(req: dict, ctx: dict) -> str:
         lines.append("\n[밸류에이션]")
         lines += [f" {ln}" for ln in ctx["valuation_lines"]]
 
+    if ctx.get("decline_note"):
+        lines.append("\n[하락 요인]")
+        lines.append(f" {ctx['decline_note']}")
+
     if ctx.get("points"):
         lines.append("\n[투자 포인트]")
         lines += [f" {ln}" for ln in ctx["points"]]

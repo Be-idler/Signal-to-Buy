@@ -19,6 +19,18 @@ WAIT_MINUTES = 60          # 배치 미완료 시 최대 대기
 POLL_INTERVAL = 300
 
 
+def _drop_reason(qual: dict, entry: dict, m: dict) -> str:
+    """하락 사유: LLM D2(원문 근거) 우선 → 시장 요인 분해 → 52주 낙폭 순."""
+    d2 = qual.get("drop_reason") or (qual.get("D2") or {}).get("reason")
+    if d2:
+        return d2
+    mc = entry.get("market_context") or {}
+    if mc.get("note"):
+        return mc["note"]
+    dd = m.get("drawdown_52w")
+    return f"52주 고점 대비 {dd:+.0%}" if dd is not None else "하락사유 미확보"
+
+
 def _format_buy(ticker: str, entry: dict, decision: dict, result: dict) -> str:
     """BUY 상세 (v1 format_buy 준용)."""
     lines = [
@@ -29,20 +41,19 @@ def _format_buy(ticker: str, entry: dict, decision: dict, result: dict) -> str:
     ]
     secs = result["sections"]
     lines.append("  섹션: " + " ".join(f"{k}={secs[k]['total']:.1f}" for k in "ABCDEF"))
+    mc = entry.get("market_context") or {}
+    if mc.get("verdict") in ("market", "mixed"):
+        lines.append(f"  하락요인: {mc['note']}")
     return "\n".join(lines)
 
 
 def _format_digest_row(ticker: str, entry: dict, decision: dict, qual: dict,
                        m: dict) -> str:
     """그라운딩 숏리스트 폴백 — 3줄/종목 (v1 §6)."""
-    drop = (qual.get("drop_reason")
-            or (qual.get("D2") or {}).get("reason"))
-    if not drop:
-        dd = m.get("drawdown_52w")
-        drop = f"52주 고점 대비 {dd:+.0%}" if dd is not None else "하락사유 미확보"
     select = qual.get("selection_reason") or "선정사유 미확보"
     return (f"• {ticker} — 총점 {decision['total']:.2f} · {decision['verdict']} · "
-            f"RSI {entry.get('rsi')}\n  하락사유: {drop}\n  선정사유: {select}")
+            f"RSI {entry.get('rsi')}\n  하락사유: {_drop_reason(qual, entry, m)}"
+            f"\n  선정사유: {select}")
 
 
 def main() -> int:

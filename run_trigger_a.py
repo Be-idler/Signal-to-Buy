@@ -20,7 +20,8 @@ import traceback
 import pandas as pd
 
 import config
-from dhandho import dart, frameworks, gate, krx, llm, metrics, notify, rsi, storage
+from dhandho import (dart, frameworks, gate, krx, llm, market, metrics, notify,
+                     rsi, storage)
 
 
 def _jsonable(obj):
@@ -160,6 +161,19 @@ def main() -> int:
                 finalists[t] = {"rsi": round(oversold[t], 2), "quant": quant,
                                 "metrics": m}
         print(f"[trigger_a] finalists after quant gate: {sorted(finalists)}")
+
+        # 시장 요인 분해: 급락이 지수 동반인지(전 종목 시총합 프록시, 추가 API 없음).
+        # 60일치 EOD가 이미 메모리에 있어 종목별 베타까지 비용 없이 산출.
+        if finalists:
+            mdates, mlevels = market.build_series(snapshots)
+            mrets = market.returns(mlevels)
+            mkt_dd = market.drawdown(mlevels)
+            for t in finalists:
+                stock_dd = market.drawdown(eod.get(t, {}).get("closes"))
+                srets = market.returns(market.stock_level_series(snapshots, t, mdates))
+                b = market.beta(srets, mrets)
+                finalists[t]["market_context"] = market.assess_decline(
+                    stock_dd, mkt_dd, b, window_label="최근 60거래일")
 
         checkpoint = {"date": date_str, "finalists": {}, "batch_id": None,
                       "peers_size": {k: len(v) for k, v in peers.items()}}

@@ -21,7 +21,7 @@ import requests
 import config
 
 BASE = "https://opendart.fss.or.kr/api"
-_CORP_CODES_TIMEOUT_SEC = 90
+_CORP_CODES_TIMEOUT_SEC = 120
 
 # 보고서 코드 (12월 결산 기준)
 REPRT_ANNUAL = "11011"   # 사업보고서

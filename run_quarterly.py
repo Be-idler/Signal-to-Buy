@@ -33,11 +33,36 @@ from dhandho import dart, notify, storage
 WORKERS = int(os.environ.get("QUARTERLY_WORKERS", "4"))
 MAX_RUNTIME_MIN = float(os.environ.get("MAX_RUNTIME_MIN", "320"))
 CONTINUE_MARKER = ".continue_needed"
+CORP_CODES_CACHE = "meta/corp_codes.json"
 _START = time.monotonic()
 
 
 def _time_left() -> bool:
     return (time.monotonic() - _START) < MAX_RUNTIME_MIN * 60
+
+
+def _corp_codes() -> dict[str, str]:
+    """DART 상장사 매핑 — Drive 캐시 폴백.
+
+    corpCode.xml(전 상장사 zip)은 수 MB라 GitHub 러너에서 간헐적으로 수십
+    초~수 분씩 걸려 하드 타임아웃에 걸릴 수 있다. 정상 조회 시 Drive에
+    캐시하고, 라이브 조회가 실패하면 마지막 캐시로 폴백해 적재·재수집이
+    이 한 번의 다운로드 실패로 통째로 중단되지 않도록 한다.
+    """
+    try:
+        codes = dart.get_corp_codes()
+        try:
+            storage.save_json(codes, CORP_CODES_CACHE)
+        except Exception as e:                       # noqa: BLE001 — 캐시 저장 실패는 비치명
+            print(f"[quarterly] corp_codes 캐시 저장 실패(무시): {e}")
+        return codes
+    except Exception as e:                           # noqa: BLE001
+        cached = storage.load_json(CORP_CODES_CACHE)
+        if cached:
+            print(f"[quarterly] corp_codes 라이브 조회 실패 → Drive 캐시 사용 "
+                  f"({len(cached)}종목): {e}")
+            return cached
+        raise
 
 FIN_COLUMNS = (["ticker", "corp_code", "revenue", "operating_income", "gross_profit",
                 "net_income", "net_income_controlling", "total_assets",
@@ -73,7 +98,7 @@ def collect(year: int, reprt_code: str) -> int | None:
     ckpt = storage.load_json(ckpt_path) or {"done": [], "rows": []}
     done = set(ckpt["done"])
 
-    corp_codes = dart.get_corp_codes()
+    corp_codes = _corp_codes()
     todo = [(t, c) for t, c in sorted(corp_codes.items()) if t not in done]
     print(f"[quarterly] {year}_{reprt_code}: {len(corp_codes)} corps, "
           f"{len(done)} done, {len(todo)} todo")
@@ -129,7 +154,7 @@ def repair_missing(year: int, reprt_code: str, tickers: list[str]) -> None:
     if df is None:
         raise RuntimeError(f"[repair] {path} 없음 — 먼저 전체 적재가 필요합니다")
 
-    corp_codes = dart.get_corp_codes()
+    corp_codes = _corp_codes()
     new_rows = []
     for t in tickers:
         corp = corp_codes.get(t)
@@ -178,7 +203,7 @@ def recollect_missing(year: int, reprt_code: str) -> None:
     if df is None:
         raise RuntimeError(f"[recollect] {path} 없음 — 먼저 전체 적재가 필요합니다")
 
-    corp_codes = dart.get_corp_codes()
+    corp_codes = _corp_codes()
     present = set(df["ticker"].astype(str))
     empty = set(storage.load_json(empty_path) or [])
     missing = [(t, corp_codes[t]) for t in sorted(corp_codes)

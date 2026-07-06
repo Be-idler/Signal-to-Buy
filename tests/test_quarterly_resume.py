@@ -167,6 +167,30 @@ def test_recollect_transient_failure_not_cached(env):
     assert set(df["ticker"]) == {"000010", "000020"}          # 추가 없음, 기존 보존
 
 
+def test_corp_codes_cached_on_success(env):
+    codes = run_quarterly._corp_codes()
+    assert codes == {"000010": "C1", "000020": "C2", "000030": "C3"}
+    assert env.json[run_quarterly.CORP_CODES_CACHE] == codes   # Drive에 캐시됨
+
+
+def test_corp_codes_falls_back_to_cache_on_failure(env, monkeypatch):
+    env.json[run_quarterly.CORP_CODES_CACHE] = {"000010": "C1", "000099": "C9"}
+
+    def boom():
+        raise RuntimeError("corpCode.xml 다운로드가 120초를 초과함")
+    monkeypatch.setattr(run_quarterly.dart, "get_corp_codes", boom)
+    codes = run_quarterly._corp_codes()
+    assert codes == {"000010": "C1", "000099": "C9"}           # 캐시 폴백
+
+
+def test_corp_codes_reraises_without_cache(env, monkeypatch):
+    def boom():
+        raise RuntimeError("corpCode.xml 다운로드가 120초를 초과함")
+    monkeypatch.setattr(run_quarterly.dart, "get_corp_codes", boom)
+    with pytest.raises(RuntimeError, match="120초"):           # 캐시 없으면 그대로 실패
+        run_quarterly._corp_codes()
+
+
 def test_recollect_noop_when_complete(env):
     # 유니버스 전부 적재되어 있으면 재수집 대상 없음
     env.parquet["financials/2025_11011.parquet"] = pd.DataFrame(

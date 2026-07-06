@@ -11,9 +11,11 @@ from __future__ import annotations
 import sys
 import traceback
 
+import datetime as dt
+
 import config
 from dhandho import (asymmetry, dart, frameworks, frameworks_ackman,
-                     frameworks_lynch, gate, metrics, notify, pit,
+                     frameworks_lynch, gate, krx, market, metrics, notify, pit,
                      query_parser, report_format, target_price)
 
 _CHECKLIST_COMMON = [
@@ -76,6 +78,11 @@ def analyze(req: dict) -> str:
     ctx = {"basis": basis, "corrected_from": req["date"] if corrected else None,
            "close": close, "mktcap": mktcap, "fin_as_of": fin_as_of,
            "flags": list(m.get("flags") or [])}
+
+    # 하락 요인 분해(시장 vs 개별) — 경량 2점 비교, best-effort (실패 시 생략)
+    decline = _market_decline(ticker, close, basis, prices)
+    if decline and decline.get("note"):
+        ctx["decline_note"] = decline["note"]
 
     scheme = req["scheme"]
     if scheme == "dhandho":
@@ -142,6 +149,37 @@ def analyze(req: dict) -> str:
     ctx["assumptions"] = tp["assumptions"]
     ctx["checklist"] = _CHECKLIST_COMMON + _CHECKLIST_SCHEME.get(scheme, [])
     return report_format.build(req, ctx)
+
+
+def _market_decline(ticker: str, close, basis: str, end_prices: dict,
+                    lookback_days: int = 30) -> dict | None:
+    """기준일과 약 lookback_days일 전 스냅샷 2점으로 시장 요인 분해.
+
+    지수 데이터를 따로 받지 않고 전 종목 시총 합 변화를 시장 프록시로 쓴다.
+    KRX 조회 ≤5회(휴장일 보정)로 가볍게. 실패하면 None(리포트에서 생략).
+    """
+    try:
+        d = dt.date(int(basis[:4]), int(basis[4:6]), int(basis[6:8]))
+        start_d = d - dt.timedelta(days=lookback_days)
+        start_rows = None
+        for _ in range(5):                      # 휴장일이면 하루씩 당겨 재시도
+            rows = krx.get_market_snapshot(start_d.strftime("%Y%m%d"))
+            if rows:
+                start_rows = rows
+                break
+            start_d -= dt.timedelta(days=1)
+        if not start_rows or not close:
+            return None
+        srow = next((r for r in start_rows if r.get("ticker") == ticker), None)
+        if not srow or not srow.get("close"):
+            return None
+        stock_change = close / srow["close"] - 1.0
+        mkt_change = market.two_point_change(start_rows, list(end_prices.values()))
+        weeks = max(1, (d - start_d).days // 7)
+        return market.assess_decline(stock_change, mkt_change, None,
+                                     window_label=f"최근 약 {weeks}주")
+    except Exception:                            # noqa: BLE001 — 부가정보라 실패 무시
+        return None
 
 
 def analyze_text(text: str) -> str:

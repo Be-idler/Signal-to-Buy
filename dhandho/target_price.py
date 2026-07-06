@@ -125,10 +125,18 @@ def _outsiders(m, close, shares, asym, evidence, closes):
 
 
 def _ltgg(m, close, shares, asym, evidence, closes):
-    """분할매수 밴드(변동성 기반) — 철학상 정밀 목표가 부정, 5년 시나리오만."""
-    assumptions = ["LTGG는 정밀 목표가를 부정 — 분할매수 밴드·5년 시나리오만 제시"]
+    """분할매수 밴드 + 5년 목표가(기본).
+
+    LTGG(베일리 기포드)는 단기 정밀 목표가를 부정하고 장기(5년+) 성장에
+    베팅한다. 따라서 목표가는 '5년 목표가'를 기본으로 산출하고, 단기
+    (6개월·1년·3년)는 산출하지 않는다. 5년 목표가는 현재가에 매출 5년
+    CAGR을 5년 복리한 성장 시나리오(밸류에이션 배수 유지 가정)다.
+    """
+    assumptions = ["LTGG는 단기 목표가를 부정 — 5년 성장 목표가를 기본으로 제시"]
     if close is None:
         return {"entry": "산출 불가(종가 미확보)", "targets": {}, "assumptions": assumptions}
+
+    # 분할매수 밴드 (변동성 기반)
     if len(closes) >= 20:
         rets = [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes))
                 if closes[i - 1]]
@@ -137,13 +145,24 @@ def _ltgg(m, close, shares, asym, evidence, closes):
         vol = 0.4
         assumptions.append("변동성 시계열 부족 → 연 40% 가정")
     lo, hi = close * (1 - 0.5 * vol), close * (1 + 0.25 * vol)
+
+    # 5년 목표가: 매출 5년 CAGR로 주가가 성장에 연동(배수 유지 가정)
     g = m.get("revenue_cagr_5y")
-    bull = (f"5년 매출 2배+ 시나리오(현 CAGR {g:.0%} 지속 가정, 확률은 사람이 판정)"
-            if g is not None else "5년 시나리오 산출 불가(성장률 미확보)")
+    if g is not None:
+        g_c = max(min(g, 0.40), 0.0)                 # 성장 0~40%/년 보수 클립
+        mult = (1 + g_c) ** 5
+        t5 = close * mult
+        five_year = (f"{_won(t5)} (5년 매출 CAGR {g_c:.0%} 지속 → 약 {mult:.1f}배 "
+                     f"시나리오 · 밸류에이션 배수 유지 가정 · 확률은 사람이 판정)")
+        assumptions.append("5년 목표가 = 현재가 × (1+매출CAGR)^5 (성장 0~40% 클립, 배수 불변)")
+    else:
+        five_year = "산출 불가(매출 성장률 미확보)"
+
     return {"entry": f"{_won(lo)} ~ {_won(hi)} 분할매수 밴드 (연변동성 {vol:.0%} 기반)",
-            "targets": {"6개월": f"{NO_TARGET} — 해당 스킴은 5년 미만 목표가를 산출하지 않음",
+            "targets": {"6개월": f"{NO_TARGET} — 단기 목표가는 산출하지 않음(장기 성장 전제)",
                         "1년": f"{NO_TARGET} — 동일",
-                        "3년": bull},
+                        "3년": f"{NO_TARGET} — 동일",
+                        "5년": five_year},
             "assumptions": assumptions}
 
 

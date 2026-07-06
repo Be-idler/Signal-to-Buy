@@ -154,7 +154,28 @@ def test_ltgg_refuses_short_horizon():
     m = {"revenue_cagr_5y": 0.25}
     tp = target_price.compute("ltgg", m, close=100.0, shares=10.0)
     assert "산출하지 않음" in tp["targets"]["6개월"]
+    assert "산출 안 함" in tp["targets"]["3년"]           # 단기는 전부 부정
     assert "분할매수 밴드" in tp["entry"]
+
+
+def test_ltgg_five_year_target_is_default():
+    # 매출 5년 CAGR 25% → 5년 목표가 = 100 × 1.25^5 ≈ 305원, 약 3.1배
+    m = {"revenue_cagr_5y": 0.25}
+    tp = target_price.compute("ltgg", m, close=100.0, shares=10.0)
+    assert "305원" in tp["targets"]["5년"]
+    assert "3.1배" in tp["targets"]["5년"]
+
+
+def test_ltgg_five_year_growth_clipped():
+    # 비현실적 고성장(80%)도 40%로 클립 → 100 × 1.4^5 ≈ 538원
+    m = {"revenue_cagr_5y": 0.80}
+    tp = target_price.compute("ltgg", m, close=100.0, shares=10.0)
+    assert "538원" in tp["targets"]["5년"] and "40%" in tp["targets"]["5년"]
+
+
+def test_ltgg_five_year_target_needs_growth():
+    tp = target_price.compute("ltgg", {}, close=100.0, shares=10.0)   # 성장률 미확보
+    assert "산출 불가" in tp["targets"]["5년"]
 
 
 def test_ackman_refuses_without_catalyst():

@@ -11,6 +11,7 @@ anthropic>=0.40
 google-api-python-client>=2.100
 google-auth>=2.23
 google-auth-oauthlib>=1.1
+google-auth-httplib2>=0.2
 
 # 개발
 pytest>=7.4

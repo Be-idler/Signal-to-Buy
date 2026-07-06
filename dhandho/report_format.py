@@ -94,7 +94,7 @@ def build(req: dict, ctx: dict) -> str:
         L.append("\n■ 적정 매수가·목표가")
         L.append(f" 적정 매수가: {ctx.get('entry', '산출 불가')}")
         targets = ctx.get("targets") or {}
-        for horizon in ("6개월", "1년", "3년"):
+        for horizon in ("6개월", "1년", "3년", "5년"):
             if horizon in targets:
                 L.append(f" {horizon} 목표가: {targets[horizon]}")
         for a in ctx.get("assumptions") or []:

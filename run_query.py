@@ -16,20 +16,21 @@ import datetime as dt
 import config
 from dhandho import (asymmetry, dart, frameworks, frameworks_ackman,
                      frameworks_lynch, gate, krx, market, metrics, notify, pit,
-                     query_parser, report_format, target_price)
+                     query_parser, report_format, report_labels, target_price)
 
 _CHECKLIST_COMMON = [
-    "급락/부진 원인이 일회성인지(D2) — 최근 공시·뉴스 원문 확인",
-    "경영진 이력·내부자 거래(F) — DART 임원현황·소유보고",
-    "지배구조 이벤트(터널링·관계자거래) 여부",
+    "최근 주가 부진이 일시적 악재인지, 구조적 문제인지 (공시·뉴스 원문으로 확인)",
+    "경영진 이력과 내부자 지분 변동 (사업보고서 임원현황·소유보고)",
+    "지배구조 리스크(터널링·관계자거래)가 있는지",
 ]
 _CHECKLIST_SCHEME = {
-    "dhandho": ["자산 바닥(NCAV·순현금)의 소수주주 실현 가능성 — 지주/터널링 구조 할인"],
-    "buffett": ["해자 내구성(B1)·경영진 정직성(B6) 정성 검증"],
-    "ltgg": ["TAM·침투율, 창업자·장기지향 문화(정성) — 한국 종목 적용범위 캐비엇"],
-    "outsiders": ["자사주 소각률·환원의 질(§9 한국조정)"],
-    "lynch": ["성장 스토리의 지속성 — 성장 둔화 시 PEG 이중 타격"],
-    "ackman": ["촉매의 실현 주체·타임라인 — 소수주주는 촉매를 만들 수 없음"],
+    "dhandho": ["청산가치(순현금·NCAV)가 소수주주에게 실제로 실현 가능한지 "
+                "(지주·터널링 구조라면 할인해서 봐야 함)"],
+    "buffett": ["해자의 내구성과 경영진의 정직성을 정성적으로 검증"],
+    "ltgg": ["시장 규모·침투율, 창업자의 장기지향 문화 (한국 종목에는 적용범위 밖일 수 있음)"],
+    "outsiders": ["자사주를 실제로 소각하는지, 주주환원의 질"],
+    "lynch": ["성장 스토리의 지속 가능성 (성장이 둔화되면 PEG가 급격히 나빠짐)"],
+    "ackman": ["촉매를 누가 언제 실현할 수 있는지 (소수주주는 촉매를 만들 수 없음)"],
 }
 
 
@@ -75,9 +76,9 @@ def analyze(req: dict) -> str:
             pass
 
     asym = asymmetry.compute(m)
+    flags = list(m.get("flags") or [])
     ctx = {"basis": basis, "corrected_from": req["date"] if corrected else None,
-           "close": close, "mktcap": mktcap, "fin_as_of": fin_as_of,
-           "flags": list(m.get("flags") or [])}
+           "close": close, "mktcap": mktcap, "fin_as_of": _fin_as_of_kr(fin_as_of)}
 
     # 하락 요인 분해(시장 vs 개별) — 경량 2점 비교, best-effort (실패 시 생략)
     decline = _market_decline(ticker, close, basis, prices)
@@ -90,57 +91,58 @@ def analyze(req: dict) -> str:
                                           disclosures=disclosures)
         decision = gate.decide_signal(result)
         secs = result["sections"]
-        ctx["valuation_lines"] = [
-            f"NCAV/시총 {_f(m.get('ncav_to_mktcap'))} · 순현금/시총 {_f(m.get('net_cash_to_mktcap'))}",
-            f"EV/EBIT {_f(m.get('ev_ebit'))} · PER {_f(m.get('per'))} (시장 백분위 C1={secs['C']['subscores']['C1']['score']})",
-            f"비대칭: {asymmetry.verdict(asym.get('ratio'), asym.get('negative_risk'))}",
-        ]
-        ctx["points"] = [
-            f"[사실] 섹션 " + " ".join(f"{k}={secs[k]['total']:.2f}" for k in "ABCDEF"),
-            f"[사실] 정량 판정 {decision['verdict']} — {decision['reason']}",
-            "[유추] LLM 정성(B4·D2·D3·F1·F3) 미적용(2.5 캡) — 최종 판정은 일일 파이프라인/사람",
-        ]
+        ctx["headline"] = _dhandho_headline(decision, secs)
+        ctx["valuation_bullets"] = _dhandho_valuation(m, asym)
+        ctx["section_title"] = "단도 6개 렌즈 평가"
+        ctx["section_scores"] = [
+            (report_labels.SECTION_KR[k], secs[k]["total"],
+             report_labels.grade_word(secs[k]["total"])) for k in "ABCDEF"]
+        ctx["score_caveat"] = ("정성 항목(해자·급락 원인·산업 전망·자본배분·IR 투명성)은 "
+                               "이번 분석에서 미반영되어 보수적으로 처리됐습니다. "
+                               "최종 판단에는 사람의 확인이 필요합니다.")
     elif scheme == "lynch":
         r = frameworks_lynch.score_lynch(m)
-        ctx["valuation_lines"] = [
-            f"카테고리: {r['category']} · PEG {_f(r.get('peg'))} · PER {_f(m.get('per'))}",
-            f"EPS 성장(5y) {_pct(m.get('eps_cagr_5y'))} · 부채비율 {_f(m.get('debt_ratio'))}",
+        ctx["headline"] = (f"피터 린치 관점에서 '{r['category']}' 유형으로 분류되며, "
+                           f"평가 등급은 '{r['grade']}'입니다. {r['basis']}.")
+        ctx["valuation_bullets"] = [
+            f"카테고리: {r['category']}",
+            f"PEG(주가수익성장배율): {_num(r.get('peg'))}"
+            + ("  — 낮을수록 성장 대비 저평가" if r.get("peg") is not None else ""),
+            f"5년 EPS 성장률: {_pct(m.get('eps_cagr_5y'))} · 부채비율: {_pct_ratio(m.get('debt_ratio'))}",
         ]
-        ctx["points"] = [f"[사실] {r['basis']}", f"[사실] 점수 {r['score']} [{r['grade']}]",
-                         f"[유추] {r['limits']}"]
-        ctx["flags"] += r["flags"]
+        ctx["section_scores"] = [("종합 평가", r["score"],
+                                  report_labels.grade_word(r["score"]))]
+        ctx["score_caveat"] = r["limits"]
+        flags += r["flags"]
     elif scheme == "ackman":
         r = frameworks_ackman.score_ackman(m, disclosures)
-        ctx["valuation_lines"] = [
-            f"퀄리티 {r['quality']} × 촉매 {r['catalyst']} → 총점 {r['total']} [{r['grade']}]",
-            f"FCF마진 {_pct(m.get('fcf_margin'))} · ROIC {_pct(m.get('roic'))} · 부채비율 {_f(m.get('debt_ratio'))}",
+        ctx["headline"] = (f"빌 애크먼 관점 종합 평가는 '{r['grade']}'입니다"
+                           + (f" — {r['labels'][0]}." if r["labels"] else "."))
+        ev = r["catalyst_evidence"]
+        ctx["valuation_bullets"] = [
+            f"기업 퀄리티: {r['quality']:.1f}점 · 촉매 실현성: {r['catalyst']:.1f}점",
+            f"FCF 마진: {_pct(m.get('fcf_margin'))} · 자본수익성(ROIC): {_pct(m.get('roic'))}",
+            ("촉매 근거: " + "; ".join(ev[:3])) if ev else "촉매를 뒷받침할 공시 근거가 없습니다.",
         ]
-        ctx["points"] = ([f"[사실] 촉매 근거: {e}" for e in r["catalyst_evidence"][:3]]
-                         or ["[사실] 촉매 공시 근거 없음"])
-        ctx["points"] += [f"[유추] {lbl}" for lbl in r["labels"]]
-        ctx["points"].append(f"[유추] {r['limits']}")
-        ctx["flags"] += r["flags"]
+        ctx["section_scores"] = [("종합 평가", r["total"],
+                                  report_labels.grade_word(r["total"]))]
+        ctx["score_caveat"] = r["limits"]
+        flags += r["flags"]
     else:                                        # ltgg / outsiders / buffett
-        scorer = {"ltgg": frameworks.score_ltgg,
-                  "outsiders": frameworks.score_outsiders,
-                  "buffett": frameworks.score_buffett}[scheme]
-        r = scorer(m)
-        key_lines = {
-            "ltgg": f"매출CAGR(5y) {_pct(m.get('revenue_cagr_5y'))} · ROIIC {_pct(m.get('roiic'))}",
-            "outsiders": f"FCF수익률 {_pct(m.get('fcf_yield'))} · FCF CAGR {_pct(m.get('fcf_cagr_5y'))} · ROIC {_pct(m.get('roic'))}",
-            "buffett": f"오너어닝스수익률≈FCF/시총 {_pct(m.get('fcf_yield'))} · ROE(평균) {_pct(m.get('roe_mean'))} · EV/EBIT {_f(m.get('ev_ebit'))}",
-        }
-        gates = r.get("gates") or {}
-        ctx["valuation_lines"] = [key_lines[scheme]]
-        ctx["points"] = [
-            f"[사실] 총점 {r['total']:.2f} [{r['grade']}] · 게이트 "
-            + " ".join(f"{k}:{'✓' if v else '✗'}" for k, v in gates.items()),
-            "[유추] 정성 하위지표 미적용(2.5 캡) — 근거 확보 후 재평가 필요",
-        ]
-        ctx["flags"] += r.get("flags") or []
+        r, bullets = _score_other(scheme, m)
+        ctx["headline"] = (f"{req['scheme_label']} 관점 종합 평가는 '{r['grade']}'입니다"
+                           f" (종합 {r['total']:.1f}점 / 5점 만점).")
+        ctx["valuation_bullets"] = bullets
+        subs = r.get("subscores") or {}
+        ctx["section_title"] = f"{req['scheme_label']} 항목별 평가"
+        ctx["section_scores"] = [
+            (report_labels.SUBSCORE_KR.get(k, k), v["score"],
+             report_labels.grade_word(v["score"])) for k, v in subs.items()]
+        ctx["score_caveat"] = ("정성 하위지표는 미반영되어 보수적으로 처리됐습니다. "
+                               "근거 확보 후 재평가가 필요합니다.")
+        flags += r.get("flags") or []
 
-    evidence = ([e for e in
-                 (frameworks_ackman.catalyst_score(m, disclosures)[1])]
+    evidence = (frameworks_ackman.catalyst_score(m, disclosures)[1]
                 if scheme in ("dhandho", "ackman") else [])
     tp = target_price.compute(scheme, m, close, shares, asym=asym,
                               catalyst_evidence=evidence)
@@ -148,7 +150,95 @@ def analyze(req: dict) -> str:
     ctx["targets"] = tp["targets"]
     ctx["assumptions"] = tp["assumptions"]
     ctx["checklist"] = _CHECKLIST_COMMON + _CHECKLIST_SCHEME.get(scheme, [])
+    ctx["data_status"] = report_labels.translate_flags(flags)
     return report_format.build(req, ctx)
+
+
+def _fin_as_of_kr(s: str) -> str:
+    """'2026 1분기보고서(법정기한 …)' → 사람이 읽는 문장으로 다듬기."""
+    return (s.replace("법정기한 ", "").replace(" 기준 추정)", " 이전 공시분)")
+             .replace("손익 TTM 변환", "손익은 최근 12개월 환산"))
+
+
+def _dhandho_headline(decision: dict, secs: dict) -> str:
+    verdict_kr = report_labels.VERDICT_KR.get(decision["verdict"], decision["verdict"])
+    total = decision["total"]
+    if decision["verdict"] == "BUY":
+        return (f"정량 기준으로 '{verdict_kr}'입니다. 하방보호와 밸류트랩 배제 기준을 "
+                f"통과했고 종합 점수도 기준선을 넘었습니다 (종합 {total:.1f}점 / 5점 만점).")
+    weak = []
+    if secs["A"]["total"] < 3.0:
+        weak.append("안전마진(하방보호)")
+    if secs["D"]["total"] < 3.0:
+        weak.append("안정성(밸류트랩 배제)")
+    if secs["C"]["total"] < 3.0:
+        weak.append("저평가 매력")
+    weak_txt = "·".join(weak) if weak else "일부 항목"
+    return (f"정량 기준 '{verdict_kr}' 대상입니다. {weak_txt}이(가) 단도 기준선에 못 미쳐, "
+            f"현재 가격대에서는 매수 근거가 약합니다 (종합 {total:.1f}점 / 5점 만점).")
+
+
+def _dhandho_valuation(m: dict, asym: dict) -> list[str]:
+    out = []
+    nc = m.get("net_cash_to_mktcap")
+    if nc is None:
+        out.append("순현금 상태: 계산 불가")
+    elif nc >= 0:
+        out.append(f"순현금 상태: 순현금 우위 — 보유 순현금이 시가총액의 약 {nc:.0%}")
+    else:
+        out.append(f"순현금 상태: 순부채 우위 — 순차입금이 시가총액의 약 {abs(nc):.0%}")
+    nv = m.get("ncav_to_mktcap")
+    if nv is None:
+        out.append("청산가치(NCAV): 계산 불가")
+    elif nv >= 0:
+        out.append(f"청산가치(유동자산−총부채): 시가총액의 약 {nv:.0%}")
+    else:
+        out.append(f"청산가치(유동자산−총부채): 시가총액의 약 {nv:.0%} — "
+                   f"유동자산으로 총부채를 감당하지 못하는 구조")
+    per, ee = m.get("per"), m.get("ev_ebit")
+    if per is None and ee is None:
+        out.append("이익 대비 밸류에이션(PER·EV/EBIT): 산출 불가 — 이번 분기 손익 데이터가 "
+                   "아직 채워지지 않았습니다")
+    else:
+        parts = []
+        if per is not None:
+            parts.append(f"PER {per:.1f}배")
+        if ee is not None:
+            parts.append(f"EV/EBIT {ee:.1f}배")
+        out.append("이익 대비 밸류에이션: " + " · ".join(parts))
+    out.append("업사이드/다운사이드 비대칭: "
+               + asymmetry.verdict(asym.get("ratio"), asym.get("negative_risk")))
+    return out
+
+
+def _score_other(scheme: str, m: dict) -> tuple[dict, list[str]]:
+    scorer = {"ltgg": frameworks.score_ltgg, "outsiders": frameworks.score_outsiders,
+              "buffett": frameworks.score_buffett}[scheme]
+    r = scorer(m)
+    bullets = {
+        "ltgg": [f"5년 매출 성장률(CAGR): {_pct(m.get('revenue_cagr_5y'))}",
+                 f"증분 자본수익(ROIIC): {_pct(m.get('roiic'))}"],
+        "outsiders": [f"FCF 수익률: {_pct(m.get('fcf_yield'))} · "
+                      f"5년 FCF 성장률: {_pct(m.get('fcf_cagr_5y'))}",
+                      f"자본수익성(ROIC): {_pct(m.get('roic'))}"],
+        "buffett": [f"오너어닝스 수익률(≈FCF/시총): {_pct(m.get('fcf_yield'))}",
+                    f"평균 자기자본이익률(ROE): {_pct(m.get('roe_mean'))} · "
+                    f"EV/EBIT: {_num(m.get('ev_ebit'))}배"],
+    }[scheme]
+    gates = r.get("gates") or {}
+    if gates:
+        passed = all(gates.values())
+        bullets.append("핵심 관문(게이트): "
+                       + ("통과" if passed else "미통과"))
+    return r, bullets
+
+
+def _num(x) -> str:
+    return f"{x:.1f}" if isinstance(x, (int, float)) else "산출 불가"
+
+
+def _pct_ratio(x) -> str:
+    return f"{x:.0%}" if isinstance(x, (int, float)) else "—"
 
 
 def _market_decline(ticker: str, close, basis: str, end_prices: dict,

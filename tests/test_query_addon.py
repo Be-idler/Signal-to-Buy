@@ -171,8 +171,10 @@ def test_report_header_and_disclaimer():
            "scheme_label": "단도투자", "date": "20260630"}
     ctx = {"basis": "20260630", "close": 61000.0, "mktcap": 3.6e14,
            "fin_as_of": "2025 사업보고서", "entry": "테스트", "targets": {},
-           "assumptions": [], "checklist": ["확인1"], "flags": []}
+           "assumptions": [], "checklist": ["확인1"], "data_status": []}
     text = report_format.build(req, ctx)
     assert text.splitlines()[0] == "🔎 삼성전자 단도투자 방식 분석 (2026-06-30 기준)"
     assert report_format.DISCLAIMER in text
-    assert "재무 as-of" in text
+    assert "재무 기준: 2025 사업보고서" in text
+    assert "시가총액 360조" in text                       # 3.6e14원 = 360조
+    assert "확인1" in text

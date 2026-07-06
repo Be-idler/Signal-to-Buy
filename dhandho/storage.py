@@ -15,6 +15,7 @@ import json
 import os
 import socket
 import ssl
+import threading
 import time
 
 import config
@@ -23,14 +24,47 @@ _service_cache = None
 _folder_cache: dict[str, str] = {}
 
 _RETRY_STATUS = (429, 500, 502, 503, 504)
+_HARD_CALL_TIMEOUT_SEC = 90
 
 
-def _execute(request, retries: int = 5):
-    """Drive API 요청 실행 + 재시도.
+class _StallTimeout(Exception):
+    """request.execute()가 하드 타임아웃 내에 끝나지 않음(네트워크 스톨 의심)."""
+
+
+def _with_hard_timeout(fn, *args, **kwargs):
+    """fn(*args, **kwargs)을 데몬 스레드에서 실행하고 하드 타임아웃으로 감싼다.
+
+    httplib2.Http(timeout=...)만으로는 부족했다 — 미디어 업/다운로드
+    (MediaIoBaseUpload/next_chunk) 경로가 소켓 timeout을 항상 존중한다는
+    보장이 없어, 실측으로 특정 종목 보강(업로드) 중 수십 분간 멈추는
+    현상이 재현됐다. 스레드 join 타임아웃은 전송 계층과 무관하게
+    호출부를 반드시 정해진 시간 안에 돌려준다 — 데몬 스레드라 멈춰버린
+    호출이 있어도 프로세스 종료를 막지 않는다(다음 재시도는 새 스레드로).
+    """
+    box: dict = {}
+
+    def _run():
+        try:
+            box["value"] = fn(*args, **kwargs)
+        except BaseException as e:                            # noqa: BLE001
+            box["error"] = e
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    th.join(timeout=_HARD_CALL_TIMEOUT_SEC)
+    if th.is_alive():
+        raise _StallTimeout(f"Drive API call stalled past {_HARD_CALL_TIMEOUT_SEC}s")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def _retry_call(fn, *args, retries: int = 5, **kwargs):
+    """fn(*args, **kwargs)을 하드 타임아웃 + 지수 백오프로 재시도.
 
     장시간 배치(분기 적재) 중 발생하는 일시 오류에 대비한다:
     - 429/5xx, 403 rate limit → 지수 백오프 재시도
-    - SSL/소켓 끊김 → 재시도
+    - SSL/소켓 끊김·스톨 → 재시도
     - 401(토큰 문제) → 서비스 재생성(토큰 refresh) 후 재시도
     비일시적 오류(권한 등)는 즉시 raise.
     """
@@ -43,7 +77,7 @@ def _execute(request, retries: int = 5):
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
-            return request.execute(num_retries=2)   # 클라이언트 자체 재시도 포함
+            return _with_hard_timeout(fn, *args, **kwargs)
         except HttpError as e:
             status = e.resp.status if e.resp is not None else None
             reason = str(e).lower()
@@ -54,10 +88,15 @@ def _execute(request, retries: int = 5):
                 last_err = e
             else:
                 raise
-        except (ssl.SSLError, socket.timeout, ConnectionError, OSError) as e:
+        except (ssl.SSLError, socket.timeout, ConnectionError, OSError,
+                _StallTimeout) as e:
             last_err = e
         time.sleep(min(2.0 * (2 ** attempt), 60.0))
     raise RuntimeError(f"Drive API failed after {retries} retries: {last_err}") from last_err
+
+
+def _execute(request, retries: int = 5):
+    return _retry_call(request.execute, num_retries=2, retries=retries)
 
 
 _HTTP_TIMEOUT_SEC = 60
@@ -156,7 +195,7 @@ def download_bytes(remote_path: str) -> bytes | None:
     downloader = MediaIoBaseDownload(buf, _service().files().get_media(fileId=fid))
     done = False
     while not done:
-        _, done = downloader.next_chunk(num_retries=3)
+        _, done = _retry_call(downloader.next_chunk, num_retries=3)
     return buf.getvalue()
 
 

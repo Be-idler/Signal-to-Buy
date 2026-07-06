@@ -60,20 +60,31 @@ def _execute(request, retries: int = 5):
     raise RuntimeError(f"Drive API failed after {retries} retries: {last_err}") from last_err
 
 
+_HTTP_TIMEOUT_SEC = 60
+
+
 def _service():
-    """Drive API 서비스 (lazy). 토큰 만료 시 refresh."""
+    """Drive API 서비스 (lazy). 토큰 만료 시 refresh.
+
+    httplib2.Http에 명시적 timeout을 준다 — 기본값(무제한)이면 네트워크가
+    연결 후 응답 없이 멈출 때(silent stall) 소켓 읽기가 영원히 블록되어
+    _execute()의 재시도 로직이 아예 발동하지 못한다(예외가 나야 재시도함).
+    """
     global _service_cache
     if _service_cache is not None:
         return _service_cache
+    import httplib2
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
+    from google_auth_httplib2 import AuthorizedHttp
     from googleapiclient.discovery import build
 
     creds = Credentials.from_authorized_user_file(
         config.GDRIVE_TOKEN_FILE, scopes=["https://www.googleapis.com/auth/drive.file"])
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-    _service_cache = build("drive", "v3", credentials=creds, cache_discovery=False)
+    http = AuthorizedHttp(creds, http=httplib2.Http(timeout=_HTTP_TIMEOUT_SEC))
+    _service_cache = build("drive", "v3", http=http, cache_discovery=False)
     return _service_cache
 
 

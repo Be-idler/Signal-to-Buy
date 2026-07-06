@@ -51,7 +51,7 @@ def analyze(req: dict) -> str:
     close, mktcap = row.get("close"), row["mktcap"]
     shares = (mktcap / close) if close else None
 
-    fins, history, fin_as_of = pit.load_financials_asof(basis)
+    fins, history, fin_as_of = pit.load_financials_asof(basis, require_ticker=ticker)
     if ticker not in fins:
         raise RuntimeError(f"{ticker}: 기준일 이전 재무 SSOT 없음")
 

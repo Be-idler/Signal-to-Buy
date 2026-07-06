@@ -79,25 +79,40 @@ def load_prices(basis: str) -> dict[str, dict]:
     return {r["ticker"]: r for r in snapshot}
 
 
-def load_financials_asof(basis: str) -> tuple[dict[str, dict], dict[str, list[dict]], str]:
+def load_financials_asof(
+    basis: str, require_ticker: str | None = None,
+) -> tuple[dict[str, dict], dict[str, list[dict]], str]:
     """기준일 시점 재무 SSOT (+TTM 변환) 로드.
 
     반환: (fin_by_ticker, history_by_ticker, as_of_label)
+
+    require_ticker 지정 시(단일 종목 질의): 최신 보고서 파일에 해당 종목이 아직
+    적재되지 않았거나(지연 공시·부분 적재) 없으면, 그 종목을 포함하는 가장 최신
+    보고서까지 거슬러 내려간다 — 최신 파일 하나에 종목이 없다고 질의를 통째로
+    실패시키지 않기 위함(룩어헤드는 여전히 발생하지 않음). 대체 시 as_of에 명기.
     """
     d = dt.date(int(basis[:4]), int(basis[4:6]), int(basis[6:8]))
     latest_df, latest_year, latest_reprt = None, None, None
+    skipped_newer: str | None = None          # 종목이 없어 건너뛴 최신 보고서
     for year, reprt in available_reports(d):
         path = f"financials/{year}_{reprt}.parquet"
-        if storage.exists(path):
-            latest_df = storage.read_parquet(path)
-            latest_year, latest_reprt = year, reprt
-            break
+        if not storage.exists(path):
+            continue
+        df = storage.read_parquet(path)
+        if require_ticker is not None and require_ticker not in set(df["ticker"]):
+            if skipped_newer is None:
+                skipped_newer = f"{year} {REPRT_NAME[reprt]}"
+            continue
+        latest_df, latest_year, latest_reprt = df, year, reprt
+        break
     if latest_df is None:
         raise RuntimeError(f"기준일 {basis} 이전에 공시된 재무 SSOT가 저장소에 없습니다")
 
     fins = _df_to_fins(latest_df)
     as_of = (f"{latest_year} {REPRT_NAME[latest_reprt]}"
              f"(법정기한 {statutory_deadline(latest_year, latest_reprt).isoformat()} 기준 추정)")
+    if skipped_newer is not None:
+        as_of += f" · {skipped_newer}에는 미반영(직전 보고서 기준)"
 
     if latest_reprt != REPRT_ANNUAL:
         prior_annual = _df_to_fins(storage.read_parquet(

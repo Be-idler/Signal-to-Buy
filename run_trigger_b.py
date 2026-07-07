@@ -3,10 +3,14 @@
 ⑤ 배치 결과 수신(미완료 시 대기·재시도) → ⑥ LLM 정성 포함 최종 게이트
 (§13.4: A·D ≥ 3.0 + 플래그 검사 + 총점 임계) → 봇1 알림.
 
-트리거 A·B는 같은 UTC 날짜를 공유한다(일자 어긋남 방지).
+기준일은 미발송 체크포인트를 오늘부터 최대 2일 거슬러 찾는다(크론 지연으로
+UTC 자정을 넘겨 실행돼도 트리거 A 결과를 놓치지 않도록). 발송 후에는
+체크포인트에 signal_sent를 기록해 중복 발송을 막는다.
+`--date YYYYMMDD`로 기준일 강제, `--test`로 테스트 발송 표시가 가능하다.
 """
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import sys
 import time
@@ -17,6 +21,7 @@ from dhandho import frameworks, gate, llm, notify, storage
 
 WAIT_MINUTES = 60          # 배치 미완료 시 최대 대기
 POLL_INTERVAL = 300
+CKPT_LOOKBACK_DAYS = 2     # 크론 지연 대비 체크포인트 소급 탐색 범위
 
 
 def _drop_reason(qual: dict, entry: dict, m: dict) -> str:
@@ -56,17 +61,50 @@ def _format_digest_row(ticker: str, entry: dict, decision: dict, qual: dict,
             f"\n  선정사유: {select}")
 
 
-def main() -> int:
-    date_str = dt.date.today().strftime("%Y%m%d")
+def _find_checkpoint(today: dt.date) -> tuple[str, dict] | None:
+    """오늘부터 최대 CKPT_LOOKBACK_DAYS 거슬러 미발송 체크포인트 탐색."""
+    for back in range(CKPT_LOOKBACK_DAYS + 1):
+        d = (today - dt.timedelta(days=back)).strftime("%Y%m%d")
+        ckpt = storage.load_json(f"checkpoints/trigger_a_{d}.json")
+        if ckpt is not None and not ckpt.get("signal_sent"):
+            return d, ckpt
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--date", help="기준일 YYYYMMDD (트리거 A 체크포인트 일자 강제)")
+    ap.add_argument("--test", action="store_true",
+                    help="테스트 발송 표시(메시지 앞에 🧪 태그)")
+    args = ap.parse_args(argv)
+    prefix = "🧪 [테스트 발송]\n" if args.test else ""
+
+    def send(text: str) -> bool:
+        return notify.send_bot1(prefix + text)
+
+    def mark_sent(date_str: str, ckpt: dict) -> None:
+        ckpt["signal_sent"] = True
+        ckpt["signal_sent_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        storage.save_json(ckpt, f"checkpoints/trigger_a_{date_str}.json")
+
     try:
-        ckpt = storage.load_json(f"checkpoints/trigger_a_{date_str}.json")
-        if ckpt is None:
-            print(f"[trigger_b] no trigger_a checkpoint for {date_str} (휴장일?) — skip")
-            return 0
+        if args.date:
+            date_str = args.date
+            ckpt = storage.load_json(f"checkpoints/trigger_a_{date_str}.json")
+            if ckpt is None:
+                print(f"[trigger_b] no trigger_a checkpoint for {date_str} — skip")
+                return 0
+        else:
+            found = _find_checkpoint(dt.date.today())
+            if found is None:
+                print("[trigger_b] no unsent trigger_a checkpoint "
+                      f"(최근 {CKPT_LOOKBACK_DAYS + 1}일, 휴장일?) — skip")
+                return 0
+            date_str, ckpt = found
         finalists: dict = ckpt.get("finalists") or {}
         if not finalists:
-            notify.send_bot1(notify.header_daily(date_str)
-                             + "\n정량 게이트 통과 종목 없음")
+            send(notify.header_daily(date_str) + "\n정량 게이트 통과 종목 없음")
+            mark_sent(date_str, ckpt)
             return 0
 
         # ⑤ 배치 결과 수신 (미완료 시 대기·재시도)
@@ -79,7 +117,7 @@ def main() -> int:
                 if status == "ended":
                     break
                 if time.time() > deadline:
-                    notify.send_bot1(notify.header_system(
+                    send(notify.header_system(
                         f"{notify.fmt_date(date_str)} LLM 배치 미완료(status={status}) — "
                         f"정성 미반영(2.5 캡) 신호로 대체 발송"))
                     break
@@ -107,13 +145,13 @@ def main() -> int:
 
         header = notify.header_daily(date_str) + "\n※ 최종 판단은 사람"
         if buys:
-            notify.send_bot1("\n\n".join([header] + buys))
+            send("\n\n".join([header] + buys))
         elif digest_rows:
-            notify.send_bot1("\n\n".join(
+            send("\n\n".join(
                 [header + "\n(BUY 0건 — 그라운딩 숏리스트 폴백)"] + digest_rows))
         else:
-            notify.send_bot1(notify.header_daily(date_str)
-                             + "\nBUY 0건, 그라운딩 종목 없음")
+            send(notify.header_daily(date_str) + "\nBUY 0건, 그라운딩 종목 없음")
+        mark_sent(date_str, ckpt)
         print(f"[trigger_b] BUY {len(buys)} / digest {len(digest_rows)}")
         return 0
     except Exception:

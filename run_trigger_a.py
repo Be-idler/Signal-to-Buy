@@ -172,6 +172,12 @@ def main(argv: list[str] | None = None) -> int:
 
         # ③ 분기 재무 + 당일 시총 결합 (전 종목 — peer pool 산출에도 필요)
         fin_by_ticker, history, corp_by = _load_financials(today)
+        overlap = len(set(oversold) & set(fin_by_ticker))
+        print(f"[trigger_a] 재무 {len(fin_by_ticker)}종목 / EOD {len(eod)}종목 / "
+              f"RSI 후보∩재무 {overlap}종목")
+        if oversold and not overlap:
+            print(f"[trigger_a] ⚠️ 키 불일치 의심 — oversold 예시 "
+                  f"{sorted(oversold)[:3]} vs 재무 예시 {sorted(fin_by_ticker)[:3]}")
         metrics_all: dict[str, dict] = {}
         for t, fin in fin_by_ticker.items():
             mktcap = eod.get(t, {}).get("mktcap")

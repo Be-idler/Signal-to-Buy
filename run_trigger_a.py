@@ -81,7 +81,8 @@ def _df_to_fins(df) -> dict[str, dict]:
     return fins
 
 
-def _load_financials(today: dt.date) -> tuple[dict[str, dict], dict[str, list[dict]], dict[str, str]]:
+def _load_financials(today: dt.date, basis: str | None = None,
+                     ) -> tuple[dict[str, dict], dict[str, list[dict]], dict[str, str]]:
     """Drive의 최신 분기 SSOT + 다년 사업보고서 → (최신 fin, history, corp_code).
 
     ⚠️ 보고서별 손익 기준이 다르다(사업=연간, 분기/반기=기간).
@@ -89,10 +90,15 @@ def _load_financials(today: dt.date) -> tuple[dict[str, dict], dict[str, list[di
     변환하고, 재료가 없으면 직전 연간으로 폴백한다(metrics.build_ttm).
     """
     # 최신 보고서 우선순위: 올해/작년 분기·반기·사업 순으로 가장 최근 것
-    candidates = []
-    for y in (today.year, today.year - 1):
-        for r in (dart.REPRT_Q3, dart.REPRT_HALF, dart.REPRT_Q1, dart.REPRT_ANNUAL):
-            candidates.append((y, r))
+    # basis="YYYY_REPRT" 지정 시 해당 보고서만 사용(재수집 중 부분 적재 회피·백테스트)
+    if basis:
+        y, r = basis.split("_")
+        candidates = [(int(y), r)]
+    else:
+        candidates = []
+        for y in (today.year, today.year - 1):
+            for r in (dart.REPRT_Q3, dart.REPRT_HALF, dart.REPRT_Q1, dart.REPRT_ANNUAL):
+                candidates.append((y, r))
     latest, latest_year, latest_reprt = None, None, None
     for y, r in candidates:
         path = f"financials/{y}_{r}.parquet"
@@ -162,6 +168,8 @@ def _await_trading_data(date_str: str, is_backfill: bool) -> bool:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", help="기준일 YYYYMMDD (생략 시 오늘, 지정 시 백필·테스트)")
+    ap.add_argument("--basis", help="재무 기준 보고서 강제 (예: 2025_11014) — "
+                                    "재수집 중 부분 적재 회피·백테스트용")
     args = ap.parse_args(argv)
     today = (dt.datetime.strptime(args.date, "%Y%m%d").date() if args.date
              else dt.date.today())
@@ -181,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[trigger_a] RSI<{config.RSI_THRESHOLD} + 유동성 필터: {len(oversold)} candidates")
 
         # ③ 분기 재무 + 당일 시총 결합 (전 종목 — peer pool 산출에도 필요)
-        fin_by_ticker, history, corp_by = _load_financials(today)
+        fin_by_ticker, history, corp_by = _load_financials(today, basis=args.basis)
         overlap = len(set(oversold) & set(fin_by_ticker))
         print(f"[trigger_a] 재무 {len(fin_by_ticker)}종목 / EOD {len(eod)}종목 / "
               f"RSI 후보∩재무 {overlap}종목")

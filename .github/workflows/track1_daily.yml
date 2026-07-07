@@ -22,6 +22,10 @@ on:
         description: "테스트 발송 표시 (trigger_b 전용, 🧪 태그)"
         required: false
         default: "false"
+      basis:
+        description: "재무 기준 보고서 강제 (trigger_a 전용, 예: 2025_11014)"
+        required: false
+        default: ""
 
 jobs:
   run:
@@ -64,5 +68,8 @@ jobs:
           fi
           if [ "${{ github.event.inputs.test }}" = "true" ] && [ "$STAGE" = "trigger_b" ]; then
             ARGS="$ARGS --test"
+          fi
+          if [ -n "${{ github.event.inputs.basis }}" ] && [ "$STAGE" = "trigger_a" ]; then
+            ARGS="$ARGS --basis ${{ github.event.inputs.basis }}"
           fi
           python "run_${STAGE}.py" $ARGS

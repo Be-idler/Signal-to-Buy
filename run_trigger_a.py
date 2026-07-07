@@ -26,8 +26,10 @@ import config
 from dhandho import (dart, frameworks, gate, krx, llm, market, metrics, notify,
                      rsi, storage)
 
-# 당일 실행 시 KRX 시세 발행 지연 대기(휴장일과 미발행을 구분할 수 없어 폴링)
-EOD_WAIT_MINUTES = 60
+# 당일 실행 시 KRX 시세 발행 지연 대기(휴장일과 미발행을 구분할 수 없어 폴링).
+# 외부 크론이 KST 17:30에 시작하는데 KRX 일별시세는 통상 저녁(~20:00)에
+# 발행되므로 최대 150분(= KST 20:00까지) 기다린 뒤 휴장일로 판정한다.
+EOD_WAIT_MINUTES = 150
 EOD_POLL_SECONDS = 600
 
 # 최신 보고서 parquet가 이보다 적으면 미완성 적재(빈 파일·부분 적재)로 간주하고

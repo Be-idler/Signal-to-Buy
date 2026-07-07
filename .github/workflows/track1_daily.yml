@@ -1,13 +1,22 @@
-# 트랙1 — 일일 단도 파이프라인 (명세서 §2 타임라인, 크론은 UTC)
-# 트리거 A: UTC 11:00 (KST 20:00) — RSI 필터·정량 게이트·LLM 배치 제출
-# 트리거 B: UTC 21:30 (KST 06:30, 개장 전) — 배치 수신·최종 신호·봇1 알림
+# 트랙1 — 일일 단도 파이프라인 (명세서 §2 타임라인)
+# 스케줄은 외부 크론(cron-job.org)이 repository_dispatch API로 정시에 쏜다
+# (GitHub schedule 크론은 수 시간씩 지연·누락돼 폐기 — 일정 정확 준수 목적):
+#   POST https://api.github.com/repos/Be-idler/Signal-to-Buy/dispatches
+#   · "Signal to Buy" 잡 (월–금 KST 17:30) → {"event_type":"signal-to-buy"} → trigger_a
+#   · "Signal notify" 잡 (화–토 KST 06:30) → {"event_type":"signal-notify"} → trigger_b
+# KRX 일별시세가 아직 미발행이면 trigger_a가 내부에서 최대 150분 폴링한다.
 # KRX 휴장일 여부는 run_trigger_a 내부에서 판정해 스킵한다.
 name: track1-daily
 
 on:
-  schedule:
-    - cron: "0 11 * * 1-5"    # trigger A
-    - cron: "30 21 * * 1-5"   # trigger B
+  repository_dispatch:
+    types:
+      - signal-to-buy       # trigger_a (권장 event_type)
+      - signal-notify       # trigger_b (권장 event_type)
+      - trigger_a           # 별칭 허용
+      - trigger_b
+      - "Signal to Buy"     # cron-job.org 잡 이름을 그대로 쓴 경우도 허용
+      - "Signal notify"
   workflow_dispatch:
     inputs:
       stage:
@@ -30,7 +39,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 200      # trigger_a: KRX 시세 발행 대기(최대 150분) + 파이프라인 여유
     env:
       DART_API_KEY: ${{ secrets.DART_API_KEY }}
       KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
@@ -47,29 +56,37 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Restore Google Drive token
         run: echo "${{ secrets.GDRIVE_TOKEN_JSON_B64 }}" | base64 -d > token.json
-      # 스케줄 실행은 어떤 크론이 트리거했는지(github.event.schedule)로 라우팅한다.
-      # 크론은 수 시간 지연될 수 있어 벽시계 기준 판정은 스테이지를 뒤바꾼다.
+      # repository_dispatch는 event_type(github.event.action)으로 스테이지를 라우팅한다
+      # — 벽시계 기준 판정은 실행 지연 시 스테이지가 뒤바뀌므로 쓰지 않는다.
       - name: Decide stage
         id: stage
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "stage=${{ github.event.inputs.stage }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "0 11 * * 1-5" ]; then
-            echo "stage=trigger_a" >> "$GITHUB_OUTPUT"
           else
-            echo "stage=trigger_b" >> "$GITHUB_OUTPUT"
+            case "${{ github.event.action }}" in
+              signal-notify|trigger_b|"Signal notify")
+                echo "stage=trigger_b" >> "$GITHUB_OUTPUT" ;;
+              *)
+                echo "stage=trigger_a" >> "$GITHUB_OUTPUT" ;;
+            esac
           fi
+      # date/test/basis는 workflow_dispatch 입력 또는 repository_dispatch의
+      # client_payload로 전달할 수 있다(외부에서 API 백필·테스트 발송 가능).
       - name: Run stage
         run: |
           STAGE="${{ steps.stage.outputs.stage }}"
+          DATE="${{ github.event.inputs.date || github.event.client_payload.date }}"
+          TEST="${{ github.event.inputs.test || github.event.client_payload.test }}"
+          BASIS="${{ github.event.inputs.basis || github.event.client_payload.basis }}"
           ARGS=""
-          if [ -n "${{ github.event.inputs.date }}" ]; then
-            ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+          if [ -n "$DATE" ]; then
+            ARGS="$ARGS --date $DATE"
           fi
-          if [ "${{ github.event.inputs.test }}" = "true" ] && [ "$STAGE" = "trigger_b" ]; then
+          if [ "$TEST" = "true" ] && [ "$STAGE" = "trigger_b" ]; then
             ARGS="$ARGS --test"
           fi
-          if [ -n "${{ github.event.inputs.basis }}" ] && [ "$STAGE" = "trigger_a" ]; then
-            ARGS="$ARGS --basis ${{ github.event.inputs.basis }}"
+          if [ -n "$BASIS" ] && [ "$STAGE" = "trigger_a" ]; then
+            ARGS="$ARGS --basis $BASIS"
           fi
           python "run_${STAGE}.py" $ARGS

@@ -25,40 +25,74 @@ CKPT_LOOKBACK_DAYS = 2     # 크론 지연 대비 체크포인트 소급 탐색 
 
 
 def _drop_reason(qual: dict, entry: dict, m: dict) -> str:
-    """하락 사유: LLM D2(원문 근거) 우선 → 시장 요인 분해 → 52주 낙폭 순."""
+    """하락 사유(종목 고유): LLM D2(원문 근거) 우선 → 52주 낙폭 순.
+
+    시장 동반 하락 여부는 별도 '시장요인' 줄(_market_factor_line)이 담당한다.
+    """
     d2 = qual.get("drop_reason") or (qual.get("D2") or {}).get("reason")
     if d2:
         return d2
-    mc = entry.get("market_context") or {}
-    if mc.get("note"):
-        return mc["note"]
     dd = m.get("drawdown_52w")
     return f"52주 고점 대비 {dd:+.0%}" if dd is not None else "하락사유 미확보"
 
 
-def _format_buy(ticker: str, entry: dict, decision: dict, result: dict) -> str:
+def _label(ticker: str, entry: dict, names: dict) -> str:
+    """종목명 (코드) — 이름 미확보 시 코드만."""
+    name = entry.get("name") or names.get(ticker)
+    return f"{name} ({ticker})" if name else ticker
+
+
+def _market_factor_line(entry: dict) -> str | None:
+    """시장 요인 분해 — β·지수 낙폭으로 시장 하락 기여도를 정량 표기.
+
+    급락 판정이 있으면 assess_decline의 note를 쓰고, 없어도 β·낙폭 원자료가
+    있으면 직접 계산해 항상 표기한다(종목 고유 사유와 시장 요인 구분).
+    """
+    mc = entry.get("market_context") or {}
+    if mc.get("note"):
+        return f"시장요인: {mc['note']}"
+    b = mc.get("beta")
+    sdd, mdd = mc.get("stock_dd"), mc.get("market_dd")
+    if sdd is None or mdd is None:
+        return None
+    beta_txt = f"β {b:.2f}" if b is not None else "β≈1 가정"
+    base = f"시장요인: 최근 60거래일 종목 {sdd:+.1%} vs 지수 {mdd:+.1%} ({beta_txt})"
+    bb = b if (b is not None and b > 0) else 1.0
+    if sdd < 0 and mdd < 0:
+        share = max(0.0, min(bb * mdd / sdd, 1.0))
+        return f"{base} → 시장 기여 약 {share:.0%}"
+    return base
+
+
+def _format_buy(ticker: str, entry: dict, decision: dict, result: dict,
+                names: dict) -> str:
     """BUY 상세 (v1 format_buy 준용)."""
     lines = [
-        f"🟢 {ticker}  [BUY]",
+        f"🟢 {_label(ticker, entry, names)}  [BUY]",
         f"  RSI {entry.get('rsi')} | 총점 {decision['total']:.2f} "
         f"(A {decision['A']:.2f} / D {decision['D']:.2f})",
         f"  {decision['reason']}",
     ]
     secs = result["sections"]
     lines.append("  섹션: " + " ".join(f"{k}={secs[k]['total']:.1f}" for k in "ABCDEF"))
-    mc = entry.get("market_context") or {}
-    if mc.get("verdict") in ("market", "mixed"):
-        lines.append(f"  하락요인: {mc['note']}")
+    mf = _market_factor_line(entry)
+    if mf:
+        lines.append(f"  {mf}")
     return "\n".join(lines)
 
 
 def _format_digest_row(ticker: str, entry: dict, decision: dict, qual: dict,
-                       m: dict) -> str:
-    """그라운딩 숏리스트 폴백 — 3줄/종목 (v1 §6)."""
+                       m: dict, names: dict) -> str:
+    """그라운딩 숏리스트 폴백 — 종목명·하락사유·시장요인·선정사유 (v1 §6 확장)."""
     select = qual.get("selection_reason") or "선정사유 미확보"
-    return (f"• {ticker} — 총점 {decision['total']:.2f} · {decision['verdict']} · "
-            f"RSI {entry.get('rsi')}\n  하락사유: {_drop_reason(qual, entry, m)}"
-            f"\n  선정사유: {select}")
+    lines = [f"• {_label(ticker, entry, names)} — 총점 {decision['total']:.2f} · "
+             f"{decision['verdict']} · RSI {entry.get('rsi')}",
+             f"  하락사유: {_drop_reason(qual, entry, m)}"]
+    mf = _market_factor_line(entry)
+    if mf:
+        lines.append(f"  {mf}")
+    lines.append(f"  선정사유: {select}")
+    return "\n".join(lines)
 
 
 def _find_checkpoint(today: dt.date) -> tuple[str, dict] | None:
@@ -117,6 +151,13 @@ def main(argv: list[str] | None = None) -> int:
             mark_sent(date_str, ckpt)
             return 0
 
+        # 종목명 맵 — 체크포인트에 name이 없으면 당일 EOD parquet에서 보충
+        names: dict = {}
+        if any(not e.get("name") for e in finalists.values()):
+            eod_df = storage.read_parquet(f"prices/eod_{date_str}.parquet")
+            if eod_df is not None:
+                names = dict(zip(eod_df["ticker"], eod_df["name"]))
+
         # ⑤ 배치 결과 수신 (미완료 시 대기·재시도)
         qual_by_ticker: dict = {}
         batch_id = ckpt.get("batch_id")
@@ -148,10 +189,10 @@ def main(argv: list[str] | None = None) -> int:
                  "qual": qual},
                 f"signals/{date_str}_{ticker}.json")
             if decision["verdict"] == "BUY":
-                buys.append(_format_buy(ticker, entry, decision, result))
+                buys.append(_format_buy(ticker, entry, decision, result, names))
             if qual and not qual.get("_error"):     # 그라운딩된 종목만 폴백 대상
                 digest_rows.append(_format_digest_row(ticker, entry, decision,
-                                                      qual, entry["metrics"]))
+                                                      qual, entry["metrics"], names))
 
         header = notify.header_daily(date_str) + "\n※ 최종 판단은 사람"
         if buys:

@@ -37,3 +37,40 @@ def test_find_checkpoint_skips_already_sent(monkeypatch):
 def test_find_checkpoint_none_within_lookback(monkeypatch):
     monkeypatch.setattr(run_trigger_b.storage, "load_json", lambda p: None)
     assert run_trigger_b._find_checkpoint(TODAY) is None
+
+
+# ───────────────────────────── 메시지 포맷 — 종목명·시장요인(β) 표기
+
+def test_label_prefers_checkpoint_name_then_map():
+    assert run_trigger_b._label("006050", {"name": "국영지앤엠"}, {}) == "국영지앤엠 (006050)"
+    assert run_trigger_b._label("006050", {}, {"006050": "국영지앤엠"}) == "국영지앤엠 (006050)"
+    assert run_trigger_b._label("006050", {}, {}) == "006050"
+
+
+def test_market_factor_line_computes_share_from_beta():
+    entry = {"market_context": {"note": None, "beta": 1.2,
+                                "stock_dd": -0.20, "market_dd": -0.10}}
+    line = run_trigger_b._market_factor_line(entry)
+    assert "β 1.20" in line and "-10.0%" in line
+    assert "시장 기여 약 60%" in line          # 1.2×(-10%)/(-20%) = 0.6
+
+
+def test_market_factor_line_prefers_assess_note():
+    entry = {"market_context": {"note": "최근 60거래일 하락의 약 80%가 지수 동반 하락으로 설명"}}
+    assert "80%" in run_trigger_b._market_factor_line(entry)
+
+
+def test_market_factor_line_none_without_data():
+    assert run_trigger_b._market_factor_line({}) is None
+    assert run_trigger_b._market_factor_line({"market_context": {"beta": 1.0}}) is None
+
+
+def test_digest_row_includes_name_and_market_factor():
+    entry = {"rsi": 25.5, "name": "국영지앤엠",
+             "market_context": {"beta": 0.9, "stock_dd": -0.15, "market_dd": -0.09}}
+    decision = {"total": 3.06, "verdict": "WATCH"}
+    row = run_trigger_b._format_digest_row(
+        "006050", entry, decision, {"drop_reason": "업황 부진"}, {}, {})
+    assert "국영지앤엠 (006050)" in row
+    assert "하락사유: 업황 부진" in row
+    assert "시장요인:" in row and "β 0.90" in row

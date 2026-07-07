@@ -211,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             scored[t] = quant
             if gate.quant_gate_pass(quant):
                 finalists[t] = {"rsi": round(oversold[t], 2), "quant": quant,
-                                "metrics": m}
+                                "name": eod.get(t, {}).get("name"), "metrics": m}
         print(f"[trigger_a] finalists after quant gate: {sorted(finalists)}")
 
         # 게이트 근접 상위 후보 기록 — 통과 0건인 날의 임계 적정성 점검·메시지 가시성
@@ -236,8 +236,11 @@ def main(argv: list[str] | None = None) -> int:
                 stock_dd = market.drawdown(eod.get(t, {}).get("closes"))
                 srets = market.returns(market.stock_level_series(snapshots, t, mdates))
                 b = market.beta(srets, mrets)
-                finalists[t]["market_context"] = market.assess_decline(
-                    stock_dd, mkt_dd, b, window_label="최근 60거래일")
+                ctx = market.assess_decline(stock_dd, mkt_dd, b,
+                                            window_label="최근 60거래일")
+                # β·낙폭 원자료도 보존 — 트리거 B가 시장 기여도를 항상 표기할 수 있도록
+                ctx.update({"beta": b, "stock_dd": stock_dd, "market_dd": mkt_dd})
+                finalists[t]["market_context"] = ctx
 
         checkpoint = {"date": date_str, "finalists": {}, "batch_id": None,
                       "oversold_count": len(oversold),

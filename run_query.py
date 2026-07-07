@@ -26,10 +26,17 @@ _CHECKLIST_COMMON = [
 _CHECKLIST_SCHEME = {
     "dhandho": ["청산가치(순현금·NCAV)가 소수주주에게 실제로 실현 가능한지 "
                 "(지주·터널링 구조라면 할인해서 봐야 함)"],
-    "buffett": ["해자의 내구성과 경영진의 정직성을 정성적으로 검증"],
+    "buffett": ["해자의 유형(브랜드·전환비용·네트워크·원가우위)을 특정할 수 있는지",
+                "10년 후에도 이 사업의 경제성을 예측할 수 있는지 (능력범위 — 정량 판정 불가)",
+                "재투자 이익이 주주에게 귀속되는지, 가격 인하로 소비자에게 넘어가는지 (멍거 체크)",
+                "반복매출(면도날) 비중 — 사업보고서 매출 유형 주석으로 확인"],
     "ltgg": ["시장 규모·침투율, 창업자의 장기지향 문화 (한국 종목에는 적용범위 밖일 수 있음)"],
-    "outsiders": ["자사주를 실제로 소각하는지, 주주환원의 질"],
-    "lynch": ["성장 스토리의 지속 가능성 (성장이 둔화되면 PEG가 급격히 나빠짐)"],
+    "outsiders": ["소각 의무화(2026.3) 이전의 자발적 소각 이력 — 규제 전 자발성이 진짜 신호",
+                  "자본배분 결정권이 지배주주 일가의 별도 이해관계에 종속되지 않는지",
+                  "인수 규율(지불 멀티플·영업권 손상 이력)과 저수익 사업 매각 이력"],
+    "lynch": ["성장 스토리의 지속 가능성 (성장이 둔화되면 PEG가 급격히 나빠짐)",
+              "재고 증가율이 매출 증가율을 앞지르는지 (린치의 대표 적신호 — 주석 확인)",
+              "기관 보유·애널리스트 커버리지(낮을수록 유리)와 종목 검색량 급증 여부"],
     "ackman": ["촉매를 누가 언제 실현할 수 있는지 (소수주주는 촉매를 만들 수 없음)"],
 }
 
@@ -103,15 +110,21 @@ def analyze(req: dict) -> str:
     elif scheme == "lynch":
         r = frameworks_lynch.score_lynch(m)
         ctx["headline"] = (f"피터 린치 관점에서 '{r['category']}' 유형으로 분류되며, "
-                           f"평가 등급은 '{r['grade']}'입니다. {r['basis']}.")
+                           f"평가 등급은 '{r['grade']}'입니다 "
+                           f"(종합 {r['score']:.1f}점 / 5점 만점). {r['basis']}.")
         ctx["valuation_bullets"] = [
             f"카테고리: {r['category']}",
             f"PEG(주가수익성장배율): {_num(r.get('peg'))}"
             + ("  — 낮을수록 성장 대비 저평가" if r.get("peg") is not None else ""),
+            f"배당조정 린치지수: {_num(r.get('peg_adj'))}"
+            + ("  — (성장률+배당)÷PER, 높을수록 유리 (1.0 적정·1.5 이상 우수)"
+               if r.get("peg_adj") is not None else ""),
             f"5년 EPS 성장률: {_pct(m.get('eps_cagr_5y'))} · 부채비율: {_pct_ratio(m.get('debt_ratio'))}",
         ]
-        ctx["section_scores"] = [("종합 평가", r["score"],
-                                  report_labels.grade_word(r["score"]))]
+        ctx["section_title"] = "피터 린치 항목별 평가"
+        ctx["section_scores"] = [
+            (report_labels.SUBSCORE_KR.get(k, k), v["score"],
+             report_labels.grade_word(v["score"])) for k, v in r["subscores"].items()]
         ctx["score_caveat"] = r["limits"]
         flags += r["flags"]
     elif scheme == "ackman":
@@ -220,16 +233,24 @@ def _score_other(scheme: str, m: dict) -> tuple[dict, list[str]]:
                  f"증분 자본수익(ROIIC): {_pct(m.get('roiic'))}"],
         "outsiders": [f"FCF 수익률: {_pct(m.get('fcf_yield'))} · "
                       f"5년 FCF 성장률: {_pct(m.get('fcf_cagr_5y'))}",
+                      f"증분 자본수익(ROIIC): {_pct(m.get('roiic'))} · "
                       f"자본수익성(ROIC): {_pct(m.get('roic'))}"],
         "buffett": [f"오너어닝스 수익률(≈FCF/시총): {_pct(m.get('fcf_yield'))}",
                     f"평균 자기자본이익률(ROE): {_pct(m.get('roe_mean'))} · "
                     f"EV/EBIT: {_num(m.get('ev_ebit'))}배"],
     }[scheme]
+    if scheme == "buffett" and r.get("mos_discount") is not None:
+        bullets.append(f"내재가치 대비 할인율: {_pct(r['mos_discount'])} "
+                       f"(오너어닝스 간이 산정 — 30% 미만이면 매수급 판정 불가)")
+    if scheme == "outsiders" and r.get("total_reform") is not None:
+        bullets.append(f"이원 배점 — 디스카운트 존속 {r['total']:.1f}점 / "
+                       f"해소 가정 {r['total_reform']:.1f}점 "
+                       f"(스프레드 {r['spread']:+.1f}): {r['spread_note']}")
     gates = r.get("gates") or {}
     if gates:
-        passed = all(gates.values())
+        failed = [k for k, ok in gates.items() if not ok]
         bullets.append("핵심 관문(게이트): "
-                       + ("통과" if passed else "미통과"))
+                       + ("전부 통과" if not failed else "미통과 — " + ", ".join(failed)))
     return r, bullets
 
 

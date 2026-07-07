@@ -164,22 +164,78 @@ def test_ltgg_capital_impairment_excluded():
 def test_outsiders_buyback_retirement_matters():
     retired = score_outsiders(_metrics(), buyback={"bought": True, "retired_ratio": 0.9})
     hoarded = score_outsiders(_metrics(), buyback={"bought": True, "retired_ratio": 0.0})
-    assert retired["subscores"]["O3"]["score"] == 5.0
-    assert hoarded["subscores"]["O3"]["score"] == 2.0   # 미소각 축적 감점(§9)
-    assert retired["gates"]["O3"] and not hoarded["gates"]["O3"]
+    # 소각 반영: B4(소각) 차이가 OB(주당 가치) 섹션에 반영 (의무이행=중립 3.0, 미소각=2.0)
+    assert retired["subscores"]["OB"]["score"] > hoarded["subscores"]["OB"]["score"]
+    assert retired["total"] > hoarded["total"]
+
+
+def test_outsiders_dual_scoring_and_spread():
+    # 소각 이력 우수 + 저가 매입 → E(코리아 디스카운트 해소도) 양호 케이스
+    r = score_outsiders(_metrics(cfo_to_ni=1.1),
+                        buyback={"bought": True, "retired_ratio": 0.9,
+                                 "pre_mandate_retired": True})
+    assert "total_reform" in r and "spread" in r and r["spread_note"]
+    # 미적용 = E 가중치를 A/B/C/D에 재배분 — 두 총점 모두 산출됨
+    assert isinstance(r["total_reform"], float) and isinstance(r["total"], float)
+    assert r["grade_reform"] in ("적극 검토", "분할 검토", "관심종목 편입", "보류", "제외")
+
+
+def test_outsiders_gates_block_buy_without_management_evidence():
+    # 경영진(OC) 근거 미확보 → 2.5 캡 → C게이트 미통과 → 상한 보류
+    r = score_outsiders(_metrics(cfo_to_ni=1.3),
+                        buyback={"bought": True, "retired_ratio": 0.9})
+    assert not r["gates"]["경영진(C≥3.0)"]
+    assert r["grade"] in ("보류", "제외")
+
+
+def test_outsiders_data_gate_caps_at_watch():
+    # 다년 FCF 미확보(G4) → 상한 관심종목 편입
+    r = score_outsiders(_metrics(fcf_cagr_5y=None, cfo_to_ni=1.3, roiic=0.20),
+                        insider=[{"change": 1000.0}],
+                        buyback={"bought": True, "retired_ratio": 0.9})
+    assert not r["gates"]["데이터(다년 FCF)"]
+    assert r["grade"] in ("관심종목 편입", "보류", "제외")
 
 
 def test_buffett_tunneling_hard_exclusion():
-    qual = {"B6": {"score": 1.0, "basis": [{"tier": 1}], "tunneling_confirmed": True}}
+    qual = {"G1": {"tunneling_confirmed": True}}
     r = score_buffett(_metrics(), qual=qual)
     assert r["grade"] == "제외"
     assert "tunneling_hard_excluded" in r["flags"]
 
 
-def test_buffett_b6_gate_fails_without_evidence():
-    r = score_buffett(_metrics())                       # 정성 미확보 → B6=2.5 < 3.0
-    assert not r["gates"]["B6"]
-    assert r["grade"] == "보류"
+def test_buffett_moat_capped_without_qualitative_type():
+    # 정량 지표 우수해도 해자 유형 미특정 → BB ≤ 3.0 (3점 초과 금지)
+    r = score_buffett(_metrics())
+    assert r["subscores"]["BB"]["score"] <= 3.0
+    assert "BB_type_capped" in r["flags"]
+    assert not r["gates"]["해자(B≥3.5)"]          # → 매수급 불가
+
+
+def test_buffett_margin_of_safety_from_owner_earnings():
+    # 오너어닝스 100, 시총 500 → IV = 100×1.05/0.075 = 1400 → 할인 64% → BE=5
+    m = _metrics(owner_earnings=100.0, owner_earnings_ratio=1.0,
+                 mktcap=500.0, eps_cagr_5y=0.10, ncav_to_mktcap=0.2)
+    r = score_buffett(m)
+    assert r["mos_discount"] is not None and r["mos_discount"] > 0.5
+    assert r["subscores"]["BE"]["score"] == 5.0
+    assert "BE_dcf_simplified" in r["flags"]
+
+
+def test_buffett_no_discount_scores_low_mos():
+    # 시총이 내재가치보다 큼 → 할인 없음 → BE=1, 안전마진 게이트 미통과
+    m = _metrics(owner_earnings=50.0, owner_earnings_ratio=0.5,
+                 mktcap=1.0e11, eps_cagr_5y=0.0, ncav_to_mktcap=0.2)
+    r = score_buffett(m)
+    assert r["subscores"]["BE"]["score"] == 1.0
+    assert not r["gates"]["안전마진(E≥3.0)"]
+
+
+def test_buffett_leverage_dependent_roe_discounted():
+    m = _metrics(roe_mean=0.18, debt_ratio=2.0, owner_earnings_ratio=1.0,
+                 net_debt_to_ebitda=3.0, interest_coverage=6.0)
+    r = score_buffett(m)
+    assert "BD_leveraged_roe" in r["flags"]
 
 
 # ─────────────────────────────────── 마법공식

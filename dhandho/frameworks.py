@@ -383,132 +383,281 @@ def score_ltgg(m: dict, qual: dict | None = None) -> dict:
             "grade": _grade(r["total"], all(gates.values()))}
 
 
-# ════════════════════════════════════════════════════ 아웃사이더 (§5.3)
+# ════════════════════════════════════════════════════ 아웃사이더 (손다이크 v2 — 이원 배점)
+
+def _mean_or_none(parts: list) -> float | None:
+    vals = [p for p in parts if p is not None]
+    return sum(vals) / len(vals) if vals else None
+
 
 def score_outsiders(m: dict, qual: dict | None = None,
-                    buyback: dict | None = None) -> dict:
-    """buyback: {"bought": bool, "retired_ratio": float(0~1), "issued_dilution": bool}
-    — 자사주 취득·소각 공시 기반(한국조정: 미소각 축적은 감점)."""
+                    buyback: dict | None = None,
+                    insider: list[dict] | None = None) -> dict:
+    """손다이크 아웃사이더 v2 — 이원(二元) 배점.
+
+    섹션: A 자본배분 실적(.30) · B 주당 가치 복리(.25) · C 경영진 독립성(.20, 게이트)
+          · D 재무 규율(.15) · E 코리아 디스카운트 해소도(.10)
+    이원 산출: 총점_적용(디스카운트 존속, E 포함) vs 총점_미적용(해소 가정,
+    E 가중치를 A/B/C/D에 비례 재배분). 스프레드 = 상법 개정 재평가 옵션 가치.
+    게이트: G1 터널링→제외 / G2 C<3.0→상한 보류 / G3 B<3.0→매수급 불가
+          / G4 다년 FCF 미확보→상한 관심종목.
+    buyback: {"bought": bool, "retired_ratio": 0~1, "issued_dilution": bool,
+              "pre_mandate_retired": bool(2026.3 의무화 이전 자발적 소각)}
+    """
     s = _Section("OUT")
+    hard_exclude = bool(qual and (qual.get("E1", {}) or {}).get("tunneling_confirmed"))
 
+    # ── A 자본배분 실적: A1 증분ROIC(정량) · A2 인수규율/A3 옵션전환/A4 축소용기(정성)
+    wacc = config.WACC_PROXY
+    roiic = m.get("roiic")
+    a1 = _step(roiic, [(0.15, 5), (1.5 * wacc, 4), (wacc, 3), (0.0, 2)], 1) \
+        if roiic is not None else None
+    a_qual = _mean_or_none([_qual_score(qual, k) for k in ("A2", "A3", "A4")])
+    oa = _mean_or_none([a1, a_qual])
+    if oa is not None and a_qual is None:
+        s.flags.append("OA_quant_only")      # 인수·매각 규율은 공시 대조 필요
+
+    # ── B 주당 가치 복리: B1 주당 FCF CAGR · B2 희석 · B3 매입 기회주의성 · B4 소각
     fcf_cagr = m.get("fcf_cagr_5y")
-    o1 = _step(fcf_cagr, [(0.15, 5), (0.08, 4), (0.03, 3), (0.0, 2)], 1) \
+    b1 = _step(fcf_cagr, [(0.15, 5), (0.10, 4), (0.07, 3), (0.0, 2)], 1) \
         if fcf_cagr is not None else None
-    if o1 is not None:
-        s.flags.append("O1_per_share_proxy")   # 주식수 시계열 미확보 → FCF 총액 CAGR proxy
-
-    o2 = _step(m.get("roic"), [(0.15, 5), (0.10, 4), (0.07, 3), (0.03, 2)], 1)
-
-    o3 = None
+    if b1 is not None:
+        s.flags.append("fcf_per_share_proxy")   # 주식수 시계열 미확보 → 총액 CAGR proxy
+    b2 = b3 = b4 = None
     if buyback is not None:
-        if buyback.get("bought"):
-            rr = buyback.get("retired_ratio", 0.0) or 0.0
-            # 소각비율이 핵심(§9): 취득만 하고 안 태우면 감점
-            o3 = _step(rr, [(0.8, 5), (0.5, 4), (0.2, 3)], 2.0)
-        elif buyback.get("issued_dilution"):
-            o3 = 1.0
+        if buyback.get("issued_dilution"):
+            b2 = 1.5                          # 반복 희석(CB/BW/유증)
+        elif buyback.get("bought"):
+            b2 = 4.0
         else:
-            o3 = 2.5
+            b2 = 3.0
+        if buyback.get("bought"):
+            dd = m.get("drawdown_52w")
+            b3 = 4.5 if (dd is not None and dd <= -0.25) else 3.0   # 저가 집중 매입 = 싱글턴식
+            rr = buyback.get("retired_ratio", 0.0) or 0.0
+            # 2026.3 소각 의무화 반영: 단순 의무 이행 = 3점(중립), 자발성·초과분에 가중
+            b4 = _step(rr, [(0.8, 4.5), (0.5, 4.0), (0.01, 3.0)], 2.0)
+            if buyback.get("pre_mandate_retired"):
+                b4 = _clip(b4 + 0.5)          # 규제 이전 자발적 소각 = 진짜 신호
+    ob = _mean_or_none([b1, b2, b3, b4])
 
-    fm = m.get("fcf_margin")
-    o4 = None
-    if fm is not None:
-        base = _step(fm, [(0.10, 5), (0.05, 4), (0.02, 3), (0.0, 2)], 1)
-        if fcf_cagr is not None and fcf_cagr < 0:
-            base = _clip(base - 1.0)
-        o4 = base
+    # ── C 경영진 독립성·오너십 [게이트]: 내부자 순매수(결정론) 외 정성
+    c1 = None
+    if insider is not None:
+        changes = [t.get("change") for t in insider if t.get("change") is not None]
+        net = sum(changes) if changes else 0
+        c1 = 4.0 if net > 0 else 2.0 if net < 0 else 3.0
+    c_qual = _mean_or_none([_qual_score(qual, k) for k in ("C2", "C3", "C4")])
+    oc = _mean_or_none([c1, c_qual])
 
-    o5 = _qual_score(qual, "O5")            # 린 본사·분권화
-    o6 = _qual_score(qual, "O6")            # 오너십·독립적 사고
+    # ── D 재무 규율·유연성: D1 부채의 도구적 사용 · D2 현금흐름의 질
+    d1 = None
+    ic, dr = m.get("interest_coverage"), m.get("debt_ratio")
+    ncm = m.get("net_cash_to_mktcap")
+    if dr is not None:
+        if dr > 2.0:
+            d1 = 1.5                          # 만성 과다차입
+        elif ic is not None and ic >= 5 and dr < 1.0:
+            d1 = 4.0                          # 여력 있는 보수적 부채
+        else:
+            d1 = 3.0
+        if ncm is not None and ncm > 0.5:
+            d1 = min(d1, 3.0)                 # 미배치 자본(현금 과다)은 중립 이하
+            s.flags.append("OD_idle_cash")
+    d2 = _step(m.get("cfo_to_ni"), [(1.2, 5), (1.0, 4), (0.8, 3), (0.5, 2)], 1) \
+        if m.get("cfo_to_ni") is not None else None
+    od = _mean_or_none([d1, d2])
 
-    s.add("O1", o1, 0.25)
-    s.add("O2", o2, 0.20)
-    s.add("O3", o3, 0.20)
-    s.add("O4", o4, 0.15)
-    s.add("O5", o5, 0.10)
-    s.add("O6", o6, 0.10)
+    # ── E 코리아 디스카운트 해소도 (E2 환원의 질 · E3/E4 정성)
+    e2 = None
+    if buyback is not None:
+        rr = (buyback.get("retired_ratio", 0.0) or 0.0) if buyback.get("bought") else 0.0
+        e2 = 4.0 if rr >= 0.5 else 3.0 if rr > 0 else 2.0
+    e_qual = _mean_or_none([_qual_score(qual, k) for k in ("E3", "E4")])
+    oe = _mean_or_none([e2, e_qual])
+
+    s.add("OA", oa, 0.30)
+    s.add("OB", ob, 0.25)
+    s.add("OC", oc, 0.20)
+    s.add("OD", od, 0.15)
+    s.add("OE", oe, 0.10)
     r = s.result()
-    gates = {"O1": r["subscores"]["O1"]["score"] >= 3.0,
-             "O3": r["subscores"]["O3"]["score"] >= 3.0}
+    sub = r["subscores"]
+
+    # 이원 배점: 적용(E 포함) vs 미적용(E 가중치를 A/B/C/D에 비례 재배분)
+    total_applied = r["total"]
+    total_reform = round(sub["OA"]["score"] * 0.3333 + sub["OB"]["score"] * 0.2778
+                         + sub["OC"]["score"] * 0.2222 + sub["OD"]["score"] * 0.1667, 3)
+    spread = round(total_reform - total_applied, 3)
+    if spread >= 0.15:
+        spread_note = "정책 촉매 비대칭 기회 — 구조적 할인에 갇힌 자본배분가 후보"
+    elif spread <= -0.05:
+        spread_note = "촉매 기대 의존 주의 — 개정 실현 시 오히려 하향 위험(역전)"
+    else:
+        spread_note = "스프레드 미미 — 개정은 촉매 아님, 기업 본질로 판단"
+
+    gates = {
+        "거버넌스": not hard_exclude,
+        "경영진(C≥3.0)": sub["OC"]["score"] >= 3.0,
+        "주당가치(B≥3.0)": sub["OB"]["score"] >= 3.0,
+        "데이터(다년 FCF)": fcf_cagr is not None,
+    }
     r["flags"].append("framework_target_mismatch_caveat")
-    return {"framework": "outsiders", "subscores": r["subscores"], "total": r["total"],
+    if hard_exclude:
+        r["flags"].append("tunneling_hard_excluded")
+
+    def _verdict(total: float) -> str:
+        if hard_exclude or total < 2.5:
+            return "제외"
+        if not gates["데이터(다년 FCF)"]:
+            return "관심종목 편입" if total >= 3.0 else "보류"
+        if not gates["경영진(C≥3.0)"]:
+            return "보류"
+        if total >= 4.2 and gates["주당가치(B≥3.0)"]:
+            return "적극 검토"
+        if total >= 3.6 and gates["주당가치(B≥3.0)"]:
+            return "분할 검토"
+        if total >= 3.0:
+            return "관심종목 편입"
+        return "보류"
+
+    return {"framework": "outsiders", "subscores": sub,
+            "total": total_applied, "total_reform": total_reform,
+            "spread": spread, "spread_note": spread_note,
             "gates": gates, "flags": r["flags"],
-            "grade": _grade(r["total"], all(gates.values()))}
+            "grade": _verdict(total_applied), "grade_reform": _verdict(total_reform)}
 
 
-# ════════════════════════════════════════════════════ 버핏·멍거 (§5.5)
+# ════════════════════════════════════════════════════ 버핏·멍거 (v1.0 프롬프트 정합)
 
 def score_buffett(m: dict, qual: dict | None = None) -> dict:
+    """버핏·멍거 — 섹션 A~E 가중 스코어 + 3중 게이트.
+
+    A 사업 단순성·예측가능성(.15) · B 경제적 해자(.25) · C 경영진·자본배분(.20)
+    · D 재무 건전성·이익의 질(.20) · E 내재가치 대비 안전마진(.20)
+    게이트: G1 정직성(터널링 [Fact]→제외) / G2 능력범위(정성 — 체크리스트 위임)
+          / G3 안전마진(E<3.0 = 할인 30% 미만 → 매수급 불가, 상한 관심종목)
+    평균화 함정 방지: B≥3.5 그리고 C≥3.0 동시 충족 없이는 매수급 불가.
+    """
     s = _Section("BUF")
+    hard_exclude = bool(qual and (qual.get("G1") or qual.get("B6") or {})
+                        .get("tunneling_confirmed"))
 
-    # B1 해자 내구성: 정성 + GP/A·마진 안정성 (정성 없으면 정량 proxy를 2.5 캡)
-    b1_q = _qual_score(qual, "B1")
-    gpa = m.get("gpa")
+    # ── A 사업 단순성·예측가능성: 마진 변동성 + 적자 이력 (수요 지속성은 정성)
     cv = m.get("op_margin_cv")
-    b1_quant = None
-    if gpa is not None and cv is not None:
-        b1_quant = (_step(gpa, [(0.35, 5), (0.25, 4), (0.15, 3), (0.05, 2)], 1)
-                    + _step(-cv, [(-0.2, 5), (-0.4, 4), (-0.7, 3), (-1.0, 2)], 1)) / 2
-    if b1_q is not None and b1_quant is not None:
-        b1 = (b1_q + b1_quant) / 2
-    elif b1_q is not None:
-        b1 = b1_q
-    elif b1_quant is not None:
-        b1 = min(b1_quant, CAP)             # 정성 근거 없이는 2.5 상한
-        s.flags.append("B1_quant_only_capped")
-    else:
-        b1 = None
+    a1 = _step(-cv, [(-0.15, 5), (-0.30, 4), (-0.50, 3), (-0.80, 2)], 1) \
+        if cv is not None else None
+    hist = m.get("op_income_history") or []
+    losses = sum(1 for v in hist if v is not None and v <= 0) if hist else None
+    a2 = {0: 5.0, 1: 3.0}.get(losses, 1.5) if losses is not None else None
+    ba = _mean_or_none([a1, a2])
+    if hist and len(hist) < 6:
+        s.flags.append("BA_short_history")   # 10년 변동성 미확보
 
+    # ── B 경제적 해자: ROE≥15% 지속 + GP/A + 마진 방향. 유형 특정(정성) 없으면 3.0 상한.
     roe_mean, roe_sd = m.get("roe_mean"), m.get("roe_stdev")
-    b2 = None
+    b1 = None
     if roe_mean is not None:
-        b2 = _step(roe_mean, [(0.15, 5), (0.10, 4), (0.07, 3), (0.03, 2)], 1)
+        b1 = _step(roe_mean, [(0.15, 5), (0.12, 4), (0.08, 3), (0.05, 2)], 1)
         if roe_sd is not None and roe_mean != 0 and roe_sd / abs(roe_mean) > 0.5:
-            b2 = _clip(b2 - 1.0)            # 변동 큼 → 감점
-        if len(m.get("op_income_history") or []) < 6:
-            s.flags.append("B2_short_history")   # 10y 미확보
+            b1 = _clip(b1 - 1.0)             # 지속성 결여 감점
+    b2 = _step(m.get("gpa"), [(0.35, 5), (0.25, 4), (0.15, 3), (0.05, 2)], 1) \
+        if m.get("gpa") is not None else None
+    gms = m.get("gross_margin_slope")        # 해자의 방향: 확장/침식
+    b3 = _step(gms, [(0.01, 5), (0.0, 4), (-0.005, 3), (-0.02, 2)], 1) \
+        if gms is not None else None
+    bb = _mean_or_none([b1, b2, b3])
+    moat_q = _qual_score(qual, "moat")
+    if bb is not None:
+        if moat_q is not None:
+            bb = (bb + moat_q) / 2
+        else:
+            bb = min(bb, 3.0)                # 해자 유형 미특정 → 3점 초과 금지
+            s.flags.append("BB_type_capped")
 
+    # ── C 경영진·자본배분: 증분 ROIC(정량) + 1달러 테스트·환원의 질(정성/미확보)
+    wacc = config.WACC_PROXY
+    roiic = m.get("roiic")
+    c1 = _step(roiic, [(2 * wacc, 5), (1.5 * wacc, 4), (wacc, 3), (0.0, 2)], 1) \
+        if roiic is not None else None
+    c_qual = _qual_score(qual, "capital_allocation")
+    bc = _mean_or_none([c1, c_qual])
+    if bc is not None and c_qual is None:
+        bc = min(bc, 3.5)                    # 1달러 테스트·소각의 질 미검증 → 상한
+        s.flags.append("BC_quant_only")
+
+    # ── D 재무 건전성·이익의 질: 현금전환 + 부채 앵커(순부채/EBITDA·이자보상) + 듀폰
+    oer = m.get("owner_earnings_ratio")      # 오너어닝스/순이익
+    d1 = _step(oer, [(1.0, 5), (0.8, 4), (0.6, 3), (0.3, 2)], 1) if oer is not None else None
+    nde = m.get("net_debt_to_ebitda")
+    ic = m.get("interest_coverage")
+    d2 = None
+    if nde is not None:
+        d2 = 5.0 if nde <= 0 else _step(-nde, [(-1.0, 4), (-2.5, 3), (-4.0, 2)], 1)
+    elif ic is not None:
+        d2 = _step(ic, [(10, 5), (5, 4), (3, 3), (1.5, 2)], 1)
+    if d2 is not None and ic is not None and ic < 5:
+        d2 = _clip(d2 - 1.0)                 # 이자보상 5x 미달 감점
+    bd = _mean_or_none([d1, d2])
     dr = m.get("debt_ratio")
-    b3 = _step(-dr, [(-0.3, 5), (-0.6, 4), (-1.0, 3), (-2.0, 2)], 1) if dr is not None else None
+    if bd is not None and roe_mean is not None and roe_mean >= 0.12 \
+            and dr is not None and dr > 1.5:
+        bd = _clip(bd - 0.5)                 # 레버리지 의존 ROE 할인(듀폰)
+        s.flags.append("BD_leveraged_roe")
 
-    b4 = None
-    nyr = m.get("fcf_negative_years")
-    if nyr is not None:
-        b4 = {0: 5, 1: 4, 2: 3, 3: 2}.get(nyr, 1)
-        if m.get("fcf_margin") is not None and m["fcf_margin"] < 0:
-            b4 = _clip(b4 - 1.0)
+    # ── E 내재가치 대비 안전마진: 오너어닝스 간이 DCF + 그레이엄 NCAV 교차검증
+    be = None
+    mos = None                               # 할인율(1 − 시총/내재가치)
+    oe_abs = m.get("owner_earnings")
+    mktcap = m.get("mktcap")
+    if oe_abs is not None and oe_abs > 0 and mktcap:
+        g = m.get("eps_cagr_5y")
+        g_c = max(min(g if g is not None else 0.0, 0.05), 0.0)   # 성장 0~5% 보수 클립
+        iv = oe_abs * (1 + g_c) / (0.10 - 0.025)   # 할인율 10%(국채+4%p 근사)·영구 2.5%
+        mos = 1.0 - mktcap / iv if iv > 0 else None
+        if mos is not None:
+            be = _step(mos, [(0.50, 5), (0.40, 4), (0.30, 3), (0.15, 2)], 1)
+            s.flags.append("BE_dcf_simplified")
+    ncav = m.get("ncav_to_mktcap")           # 그레이엄 관점 교차검증(높은 쪽 채택)
+    if ncav is not None and ncav >= 1.0:
+        be = max(be or 0, 4.5)
 
-    gms = m.get("gross_margin_slope")
-    b5 = _step(gms, [(0.01, 5), (0.0, 4), (-0.005, 3), (-0.02, 2)], 1) if gms is not None else None
-
-    b6 = _qual_score(qual, "B6")            # 경영진 정직성 — 하드게이트
-    hard_exclude = bool(qual and qual.get("B6", {}).get("tunneling_confirmed"))
-
-    # B7 안전마진 — 밸류에이션 엔진 보류 중(§7): 멀티플·자산 기준 판정
-    ev_ebit = m.get("ev_ebit")
-    if ev_ebit is not None:
-        b7 = _step(-ev_ebit, [(-6, 5), (-8, 4), (-10, 3), (-14, 2)], 1)
-    elif m.get("pbr") is not None:
-        b7 = _step(-m["pbr"], [(-0.6, 5), (-1.0, 4), (-1.5, 3), (-2.5, 2)], 1)
-    else:
-        b7 = None
-
-    s.add("B1", b1, 0.20)
-    s.add("B2", b2, 0.20)
-    s.add("B3", b3, 0.12)
-    s.add("B4", b4, 0.15)
-    s.add("B5", b5, 0.13)
-    s.add("B6", b6, 0.12)
-    s.add("B7", b7, 0.08)
+    s.add("BA", ba, 0.15)
+    s.add("BB", bb, 0.25)
+    s.add("BC", bc, 0.20)
+    s.add("BD", bd, 0.20)
+    s.add("BE", be, 0.20)
     r = s.result()
-    gates = {"B1": r["subscores"]["B1"]["score"] >= 3.0,
-             "B2": r["subscores"]["B2"]["score"] >= 3.0,
-             "B6": r["subscores"]["B6"]["score"] >= 3.0 and not hard_exclude}
-    grade = "제외" if hard_exclude else _grade(r["total"], all(gates.values()))
+    sub = r["subscores"]
+    total = r["total"]
+
+    gates = {
+        "정직성(G1)": not hard_exclude,
+        "해자(B≥3.5)": sub["BB"]["score"] >= 3.5,
+        "경영진(C≥3.0)": sub["BC"]["score"] >= 3.0,
+        "안전마진(E≥3.0)": sub["BE"]["score"] >= 3.0,
+    }
+    r["flags"].append("G2_circle_of_competence_manual")   # 능력범위는 사람 판정
     if hard_exclude:
-        r["flags"].append("tunneling_hard_excluded")   # §6 글로벌 거버넌스 게이트
-    return {"framework": "buffett_munger", "subscores": r["subscores"], "total": r["total"],
+        r["flags"].append("tunneling_hard_excluded")
+        grade = "제외"
+    elif total >= 4.2 and sub["BE"]["score"] >= 4.0 \
+            and gates["해자(B≥3.5)"] and gates["경영진(C≥3.0)"]:
+        grade = "적극 검토"
+    elif total >= 3.6 and gates["안전마진(E≥3.0)"] \
+            and gates["해자(B≥3.5)"] and gates["경영진(C≥3.0)"]:
+        grade = "분할 검토"
+    elif total >= 3.0:
+        grade = "관심종목 편입"
+    elif total >= 2.4:
+        grade = "보류"
+    else:
+        grade = "제외"
+
+    return {"framework": "buffett_munger", "subscores": sub, "total": total,
+            "mos_discount": round(mos, 3) if mos is not None else None,
             "gates": gates, "flags": r["flags"], "grade": grade}
+
 
 
 # ════════════════════════════════════════════════════ 마법공식 (§5.4, 전수 랭킹)

@@ -125,8 +125,27 @@ def compute_derived(fin: dict, mktcap: float | None = None,
     m["fcf"] = (cfo - abs(capex)) if (cfo is not None and capex is not None) else None
     m["fcf_margin"] = _div(m["fcf"], rev)
 
+    # 오너어닝스(버핏 1986) = 순이익 + 감가상각 − 유지CAPEX.
+    # 유지/성장 CAPEX 구분 불가 → 총 CAPEX 사용(보수적 추정치, 플래그).
+    dep = fin.get("depreciation")
+    if ni is not None and dep is not None and capex is not None:
+        m["owner_earnings"] = ni + dep - abs(capex)
+        m["flags"].append("owner_earnings_estimated")
+    else:
+        m["owner_earnings"] = None
+    # 이익의 현금전환: 오너어닝스/순이익, 영업CF/순이익 (흑자일 때만 의미)
+    m["owner_earnings_ratio"] = (_div(m["owner_earnings"], ni)
+                                 if (ni is not None and ni > 0) else None)
+    m["cfo_to_ni"] = _div(cfo, ni) if (ni is not None and ni > 0) else None
+
+    # EBITDA ≈ 영업이익 + 감가상각 → 순부채/EBITDA (버핏 D 섹션 부채 앵커)
+    m["ebitda"] = (op + dep) if (op is not None and dep is not None) else None
+
     cash_like = (cash + st_inv) if cash is not None else None
     m["net_cash"] = (cash_like - borrow) if (cash_like is not None and borrow is not None) else None
+    m["net_debt_to_ebitda"] = (_div(-m["net_cash"], m["ebitda"])
+                               if (m["net_cash"] is not None and m["ebitda"] is not None
+                                   and m["ebitda"] > 0) else None)
     m["ncav"] = (ca - tl) if (ca is not None and tl is not None) else None
     m["debt_ratio"] = _div(tl, te)                            # 부채비율(총부채/자기자본)
     if borrow is None:

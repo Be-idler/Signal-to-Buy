@@ -109,9 +109,47 @@ def test_lynch_categories():
 
 def test_lynch_peg_scoring_and_deficit_switch():
     good = score_lynch({"per": 8.0, "eps_cagr_5y": 0.20, "debt_ratio": 0.5})
-    assert good["peg"] == pytest.approx(0.4) and good["score"] == 5.0
+    assert good["peg"] == pytest.approx(0.4)
+    assert good["peg_adj"] == pytest.approx(2.5)       # (20+0)/8 — 배당 0 보수 가정
+    assert good["subscores"]["LB"]["score"] == 5.0     # 린치지수 ≥2.0 + 성장 스위트스폿
+    assert "dividend_yield_unavailable" in good["flags"]
     deficit = score_lynch({"per": None, "eps_cagr_5y": -0.1})
-    assert deficit["score"] == 2.5 and "peg_unavailable" in deficit["flags"]
+    assert deficit["subscores"]["LB"]["score"] == 2.5  # PEG 무의미 → 보수 캡
+    assert "peg_unavailable" in deficit["flags"]
+    assert deficit["grade"] in ("보류", "제외")
+
+
+def test_lynch_dividend_adjusted_peg_lifts_score():
+    base = {"per": 20.0, "eps_cagr_5y": 0.12}
+    no_div = score_lynch(base)                          # 린치지수 12/20 = 0.6 → B1 2점
+    with_div = score_lynch(base, dividend_yield=0.05)   # (12+5)/20 = 0.85 → 여전히 2점대
+    rich_div = score_lynch(base, dividend_yield=0.09)   # (12+9)/20 = 1.05 → B1 3점
+    assert with_div["peg_adj"] > no_div["peg_adj"]
+    assert rich_div["subscores"]["LB"]["score"] > no_div["subscores"]["LB"]["score"]
+
+
+def test_lynch_overheated_growth_penalized():
+    r = score_lynch({"per": 10.0, "eps_cagr_5y": 0.45})  # 30% 초과 성장 — 지속 불가능
+    assert "growth_unsustainable_penalty" in r["flags"]
+
+
+def test_lynch_slow_grower_capped_at_watch():
+    # 저성장·배당형은 점수와 무관하게 상한 = 관심종목 편입
+    r = score_lynch({"per": 4.0, "eps_cagr_5y": 0.05, "net_cash": 100.0,
+                     "fcf": 50.0, "fcf_negative_years": 0, "cfo_to_ni": 1.3})
+    assert r["category"] == "저성장·배당"
+    assert r["grade"] not in ("적극 검토", "분할 검토")
+    assert "slow_grower_watch_cap" in r["flags"]
+
+
+def test_lynch_cyclical_per_reverse_logic():
+    # 저PER + 이익이 다년 최고치 = 피크 신호 → LE 저점
+    m = {"per": 5.0, "eps_cagr_5y": None, "op_margin_cv": 0.9,
+         "op_income_history": [50.0, 80.0, 120.0, 200.0, 300.0]}
+    r = score_lynch(m)
+    assert r["category"] == "경기순환"
+    assert r["subscores"]["LE"]["score"] == 1.5
+    assert "cyclical_per_reverse_logic" in r["flags"]
 
 
 # ───────────────────────────── ackman (§4.2)

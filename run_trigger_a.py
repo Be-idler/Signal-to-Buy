@@ -30,6 +30,10 @@ from dhandho import (dart, frameworks, gate, krx, llm, market, metrics, notify,
 EOD_WAIT_MINUTES = 60
 EOD_POLL_SECONDS = 600
 
+# 최신 보고서 parquet가 이보다 적으면 미완성 적재(빈 파일·부분 적재)로 간주하고
+# 직전 보고서로 폴백한다(상장 전종목 정상 적재는 ~2,700행).
+MIN_FIN_ROWS = 100
+
 
 def _jsonable(obj):
     """checkpoint 저장용: inf/NaN → JSON 안전값."""
@@ -92,10 +96,16 @@ def _load_financials(today: dt.date) -> tuple[dict[str, dict], dict[str, list[di
     latest, latest_year, latest_reprt = None, None, None
     for y, r in candidates:
         path = f"financials/{y}_{r}.parquet"
-        if storage.exists(path):
-            latest = storage.read_parquet(path)
-            latest_year, latest_reprt = y, r
-            break
+        if not storage.exists(path):
+            continue
+        df = storage.read_parquet(path)
+        n = 0 if df is None else len(df)
+        if n < MIN_FIN_ROWS:
+            print(f"[trigger_a] ⚠️ {path} {n}행 — 미완성 적재로 간주, 직전 보고서로 폴백"
+                  f" (누락 재수집 필요: quarterly-bulk recollect {y}/{r})")
+            continue
+        latest, latest_year, latest_reprt = df, y, r
+        break
     if latest is None:
         raise RuntimeError("no quarterly financials in storage — run_quarterly first")
 

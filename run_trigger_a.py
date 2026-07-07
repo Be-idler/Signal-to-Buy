@@ -9,12 +9,15 @@
 ⑥ Haiku 추출 → Sonnet 채점 Batch 제출(async, −50%) → 체크포인트 저장
 
 KRX 휴장일은 평일이어도 전체 스킵.
+`--date YYYYMMDD`로 기준일을 지정하면 과거 일자 백필·테스트 실행이 가능하다.
 """
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import math
 import sys
+import time
 import traceback
 
 import pandas as pd
@@ -22,6 +25,16 @@ import pandas as pd
 import config
 from dhandho import (dart, frameworks, gate, krx, llm, market, metrics, notify,
                      rsi, storage)
+
+# 당일 실행 시 KRX 시세 발행 지연 대기(휴장일과 미발행을 구분할 수 없어 폴링).
+# 외부 크론이 KST 17:30에 시작하는데 KRX 일별시세는 통상 저녁(~20:00)에
+# 발행되므로 최대 150분(= KST 20:00까지) 기다린 뒤 휴장일로 판정한다.
+EOD_WAIT_MINUTES = 150
+EOD_POLL_SECONDS = 600
+
+# 최신 보고서 parquet가 이보다 적으면 미완성 적재(빈 파일·부분 적재)로 간주하고
+# 직전 보고서로 폴백한다(상장 전종목 정상 적재는 ~2,700행).
+MIN_FIN_ROWS = 100
 
 
 def _jsonable(obj):
@@ -70,7 +83,8 @@ def _df_to_fins(df) -> dict[str, dict]:
     return fins
 
 
-def _load_financials() -> tuple[dict[str, dict], dict[str, list[dict]], dict[str, str]]:
+def _load_financials(today: dt.date, basis: str | None = None,
+                     ) -> tuple[dict[str, dict], dict[str, list[dict]], dict[str, str]]:
     """Drive의 최신 분기 SSOT + 다년 사업보고서 → (최신 fin, history, corp_code).
 
     ⚠️ 보고서별 손익 기준이 다르다(사업=연간, 분기/반기=기간).
@@ -78,18 +92,28 @@ def _load_financials() -> tuple[dict[str, dict], dict[str, list[dict]], dict[str
     변환하고, 재료가 없으면 직전 연간으로 폴백한다(metrics.build_ttm).
     """
     # 최신 보고서 우선순위: 올해/작년 분기·반기·사업 순으로 가장 최근 것
-    today = dt.date.today()
-    candidates = []
-    for y in (today.year, today.year - 1):
-        for r in (dart.REPRT_Q3, dart.REPRT_HALF, dart.REPRT_Q1, dart.REPRT_ANNUAL):
-            candidates.append((y, r))
+    # basis="YYYY_REPRT" 지정 시 해당 보고서만 사용(재수집 중 부분 적재 회피·백테스트)
+    if basis:
+        y, r = basis.split("_")
+        candidates = [(int(y), r)]
+    else:
+        candidates = []
+        for y in (today.year, today.year - 1):
+            for r in (dart.REPRT_Q3, dart.REPRT_HALF, dart.REPRT_Q1, dart.REPRT_ANNUAL):
+                candidates.append((y, r))
     latest, latest_year, latest_reprt = None, None, None
     for y, r in candidates:
         path = f"financials/{y}_{r}.parquet"
-        if storage.exists(path):
-            latest = storage.read_parquet(path)
-            latest_year, latest_reprt = y, r
-            break
+        if not storage.exists(path):
+            continue
+        df = storage.read_parquet(path)
+        n = 0 if df is None else len(df)
+        if n < MIN_FIN_ROWS:
+            print(f"[trigger_a] ⚠️ {path} {n}행 — 미완성 적재로 간주, 직전 보고서로 폴백"
+                  f" (누락 재수집 필요: quarterly-bulk recollect {y}/{r})")
+            continue
+        latest, latest_year, latest_reprt = df, y, r
+        break
     if latest is None:
         raise RuntimeError("no quarterly financials in storage — run_quarterly first")
 
@@ -119,12 +143,42 @@ def _load_financials() -> tuple[dict[str, dict], dict[str, list[dict]], dict[str
     return fin_by_ticker, history_by_ticker, corp_by_ticker
 
 
-def main() -> int:
-    today = dt.date.today()
+def _await_trading_data(date_str: str, is_backfill: bool) -> bool:
+    """KRX 시세 존재 확인 — 당일 실행이면 발행 지연을 기다린다.
+
+    과거 일자(백필·테스트)는 데이터가 이미 확정돼 있어 즉시 판정한다.
+    당일 평일인데 시세가 없으면 발행 지연일 수 있어 최대 EOD_WAIT_MINUTES 폴링하고,
+    끝내 없으면 휴장일로 간주하되 시스템 메시지로 알린다(무단 스킵 방지).
+    """
+    if krx.is_trading_day(date_str):
+        return True
+    d = dt.datetime.strptime(date_str, "%Y%m%d").date()
+    if is_backfill or d.weekday() >= 5:
+        return False
+    deadline = time.time() + EOD_WAIT_MINUTES * 60
+    while time.time() < deadline:
+        print(f"[trigger_a] {date_str} KRX 시세 미발행 — {EOD_POLL_SECONDS}s 후 재확인")
+        time.sleep(EOD_POLL_SECONDS)
+        if krx.is_trading_day(date_str):
+            return True
+    notify.send_bot1(notify.header_system(
+        f"{notify.fmt_date(date_str)} KRX 시세 미발행({EOD_WAIT_MINUTES}분 대기) — "
+        f"휴장일로 간주하고 스킵"))
+    return False
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--date", help="기준일 YYYYMMDD (생략 시 오늘, 지정 시 백필·테스트)")
+    ap.add_argument("--basis", help="재무 기준 보고서 강제 (예: 2025_11014) — "
+                                    "재수집 중 부분 적재 회피·백테스트용")
+    args = ap.parse_args(argv)
+    today = (dt.datetime.strptime(args.date, "%Y%m%d").date() if args.date
+             else dt.date.today())
     date_str = today.strftime("%Y%m%d")
     try:
         # ① EOD 수집 (휴장일 스킵)
-        if not krx.is_trading_day(date_str):
+        if not _await_trading_data(date_str, is_backfill=bool(args.date)):
             print(f"[trigger_a] {date_str} is not a trading day — skip")
             return 0
         eod, snapshots = krx.get_all_eod(days=config.EOD_LOOKBACK_DAYS, end_date=today)
@@ -137,7 +191,13 @@ def main() -> int:
         print(f"[trigger_a] RSI<{config.RSI_THRESHOLD} + 유동성 필터: {len(oversold)} candidates")
 
         # ③ 분기 재무 + 당일 시총 결합 (전 종목 — peer pool 산출에도 필요)
-        fin_by_ticker, history, corp_by = _load_financials()
+        fin_by_ticker, history, corp_by = _load_financials(today, basis=args.basis)
+        overlap = len(set(oversold) & set(fin_by_ticker))
+        print(f"[trigger_a] 재무 {len(fin_by_ticker)}종목 / EOD {len(eod)}종목 / "
+              f"RSI 후보∩재무 {overlap}종목")
+        if oversold and not overlap:
+            print(f"[trigger_a] ⚠️ 키 불일치 의심 — oversold 예시 "
+                  f"{sorted(oversold)[:3]} vs 재무 예시 {sorted(fin_by_ticker)[:3]}")
         metrics_all: dict[str, dict] = {}
         for t, fin in fin_by_ticker.items():
             mktcap = eod.get(t, {}).get("mktcap")
@@ -152,15 +212,29 @@ def main() -> int:
 
         # ④ 정량 스코어링 → 2차 게이트 → finalists
         finalists: dict[str, dict] = {}
+        scored: dict[str, dict] = {}
         for t in oversold:
             m = metrics_all.get(t)
             if m is None:
                 continue
             quant = frameworks.score_dhandho_quant(m, peers=peers)
+            scored[t] = quant
             if gate.quant_gate_pass(quant):
                 finalists[t] = {"rsi": round(oversold[t], 2), "quant": quant,
-                                "metrics": m}
+                                "name": eod.get(t, {}).get("name"), "metrics": m}
         print(f"[trigger_a] finalists after quant gate: {sorted(finalists)}")
+
+        # 게이트 근접 상위 후보 기록 — 통과 0건인 날의 임계 적정성 점검·메시지 가시성
+        near_misses = [
+            {"ticker": t, "name": eod.get(t, {}).get("name"),
+             "rsi": round(oversold[t], 2),
+             "A_quant": round(q["A_quant"], 2), "D_quant": round(q["D_quant"], 2)}
+            for t, q in sorted(scored.items(),
+                               key=lambda kv: -(kv[1]["A_quant"] + kv[1]["D_quant"]))
+            if t not in finalists][:5]
+        for n in near_misses:
+            print(f"[trigger_a] near-miss {n['ticker']} {n['name']} "
+                  f"A {n['A_quant']} / D {n['D_quant']} (기준 각 3.0)")
 
         # 시장 요인 분해: 급락이 지수 동반인지(전 종목 시총합 프록시, 추가 API 없음).
         # 60일치 EOD가 이미 메모리에 있어 종목별 베타까지 비용 없이 산출.
@@ -172,10 +246,15 @@ def main() -> int:
                 stock_dd = market.drawdown(eod.get(t, {}).get("closes"))
                 srets = market.returns(market.stock_level_series(snapshots, t, mdates))
                 b = market.beta(srets, mrets)
-                finalists[t]["market_context"] = market.assess_decline(
-                    stock_dd, mkt_dd, b, window_label="최근 60거래일")
+                ctx = market.assess_decline(stock_dd, mkt_dd, b,
+                                            window_label="최근 60거래일")
+                # β·낙폭 원자료도 보존 — 트리거 B가 시장 기여도를 항상 표기할 수 있도록
+                ctx.update({"beta": b, "stock_dd": stock_dd, "market_dd": mkt_dd})
+                finalists[t]["market_context"] = ctx
 
         checkpoint = {"date": date_str, "finalists": {}, "batch_id": None,
+                      "oversold_count": len(oversold),
+                      "near_misses": _jsonable(near_misses),
                       "peers_size": {k: len(v) for k, v in peers.items()}}
 
         if finalists:

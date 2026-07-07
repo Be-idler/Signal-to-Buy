@@ -186,15 +186,29 @@ def main(argv: list[str] | None = None) -> int:
 
         # ④ 정량 스코어링 → 2차 게이트 → finalists
         finalists: dict[str, dict] = {}
+        scored: dict[str, dict] = {}
         for t in oversold:
             m = metrics_all.get(t)
             if m is None:
                 continue
             quant = frameworks.score_dhandho_quant(m, peers=peers)
+            scored[t] = quant
             if gate.quant_gate_pass(quant):
                 finalists[t] = {"rsi": round(oversold[t], 2), "quant": quant,
                                 "metrics": m}
         print(f"[trigger_a] finalists after quant gate: {sorted(finalists)}")
+
+        # 게이트 근접 상위 후보 기록 — 통과 0건인 날의 임계 적정성 점검·메시지 가시성
+        near_misses = [
+            {"ticker": t, "name": eod.get(t, {}).get("name"),
+             "rsi": round(oversold[t], 2),
+             "A_quant": round(q["A_quant"], 2), "D_quant": round(q["D_quant"], 2)}
+            for t, q in sorted(scored.items(),
+                               key=lambda kv: -(kv[1]["A_quant"] + kv[1]["D_quant"]))
+            if t not in finalists][:5]
+        for n in near_misses:
+            print(f"[trigger_a] near-miss {n['ticker']} {n['name']} "
+                  f"A {n['A_quant']} / D {n['D_quant']} (기준 각 3.0)")
 
         # 시장 요인 분해: 급락이 지수 동반인지(전 종목 시총합 프록시, 추가 API 없음).
         # 60일치 EOD가 이미 메모리에 있어 종목별 베타까지 비용 없이 산출.
@@ -210,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
                     stock_dd, mkt_dd, b, window_label="최근 60거래일")
 
         checkpoint = {"date": date_str, "finalists": {}, "batch_id": None,
+                      "oversold_count": len(oversold),
+                      "near_misses": _jsonable(near_misses),
                       "peers_size": {k: len(v) for k, v in peers.items()}}
 
         if finalists:

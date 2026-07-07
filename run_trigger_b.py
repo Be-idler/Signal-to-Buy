@@ -103,7 +103,17 @@ def main(argv: list[str] | None = None) -> int:
             date_str, ckpt = found
         finalists: dict = ckpt.get("finalists") or {}
         if not finalists:
-            send(notify.header_daily(date_str) + "\n정량 게이트 통과 종목 없음")
+            n_oversold = ckpt.get("oversold_count")
+            lines = [notify.header_daily(date_str),
+                     "정량 게이트 통과 종목 없음"
+                     + (f" (RSI<30 후보 {n_oversold}종목)" if n_oversold else "")]
+            near = ckpt.get("near_misses") or []
+            if near:
+                lines.append("게이트 근접 상위 (하방 A·안정 D 기준 각 3.0):")
+                lines += [f"• {n.get('name') or n['ticker']} ({n['ticker']}) "
+                          f"RSI {n['rsi']} — A {n['A_quant']:.1f} / D {n['D_quant']:.1f}"
+                          for n in near]
+            send("\n".join(lines))
             mark_sent(date_str, ckpt)
             return 0
 

@@ -1,0 +1,25 @@
+# KRX 발행 시각 측정 프로브 (일회성) — 밤~아침 KST를 30분 간격으로 샘플링해
+# 당일 데이터가 언제 발행되는지 로그에 남긴다. 발행 시각 확정 후 이 파일과
+# scripts/krx_probe.py를 삭제한다. (로그 전용 — 텔레그램·저장 없음.)
+# 크론은 UTC. KST 21:00~09:00 = UTC 12:00~다음날 00:00.
+name: krx-probe
+
+on:
+  schedule:
+    - cron: "*/30 12-23 * * *"   # KST 21:00~08:30, 30분 간격
+    - cron: "0 0 * * *"          # KST 09:00
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - run: python scripts/krx_probe.py

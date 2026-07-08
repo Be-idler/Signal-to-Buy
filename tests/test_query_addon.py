@@ -237,3 +237,53 @@ def test_report_header_and_disclaimer():
     assert "재무 기준: 2025 사업보고서" in text
     assert "시가총액 360조" in text                       # 3.6e14원 = 360조
     assert "확인1" in text
+    assert "핸드오프" not in text                        # handoff 미지정 시 블록 생략
+
+
+# ───────────────────────────── 클로드 채팅 핸드오프 (§7 확장)
+
+def test_report_renders_handoff_block():
+    req = {"ticker": "005930", "name": "삼성전자", "scheme": "buffett",
+           "scheme_label": "버핏멍거", "date": None}
+    ctx = {"basis": "20260708", "close": 61000.0, "mktcap": 3.6e14,
+           "entry": "x", "targets": {}, "assumptions": [],
+           "handoff": ["스킴=buffett(버핏멍거) · 종목=삼성전자(005930) · 기준일=20260708",
+                       "정량점수: BA=3.50"]}
+    text = report_format.build(req, ctx)
+    assert "■ 클로드 심층분석 핸드오프" in text
+    assert "스킴=buffett" in text
+    # 핸드오프는 고지문(disclaimer)보다 앞에 위치
+    assert text.index("핸드오프") < text.index(report_format.DISCLAIMER)
+
+
+def test_handoff_lines_contents():
+    import run_query
+    req = {"ticker": "006050", "name": "국영지앤엠", "scheme": "buffett",
+           "scheme_label": "버핏멍거", "date": None}
+    lines = run_query._handoff_lines(
+        req, "20260708",
+        scores={"BA": 3.5, "BB": 3.0, "BC": 3.5, "BD": 4.2, "BE": 2.5},
+        total=3.28, grade="보류",
+        gates={"정직성(G1)": True, "해자(B≥3.5)": False},
+        extras=["캡 이전 정량값: BB=3.4 BC=3.8"],
+        flags=["BB_type_capped", "BC_quant_only"])
+    joined = "\n".join(lines)
+    assert "스킴=buffett(버핏멍거) · 종목=국영지앤엠(006050) · 기준일=20260708" in joined
+    assert "BB=3.00" in joined and "종합 3.28" in joined and "등급 '보류'" in joined
+    assert "정직성(G1)=통과" in joined and "해자(B≥3.5)=미달" in joined
+    assert "캡 이전 정량값: BB=3.4 BC=3.8" in joined
+    assert "재채점 대상(정성): " in joined and "moat" in joined
+    assert "BB_type_capped;BC_quant_only" in joined
+    assert "prompts/buffett.md" in joined
+
+
+def test_buffett_exposes_quant_precap():
+    from dhandho.frameworks import score_buffett
+    m = {"roe_mean": 0.16, "roe_stdev": 0.02, "gpa": 0.30,
+         "gross_margin_slope": 0.005, "roiic": 0.20, "op_margin_cv": 0.1,
+         "op_income_history": [10, 12, 14, 15, 16, 17]}
+    r = score_buffett(m)
+    pre = r["quant_precap"]
+    assert pre["BB"] is not None and pre["BB"] > 3.0    # 캡 이전 정량값 > 캡(3.0)
+    assert r["subscores"]["BB"]["score"] == 3.0         # 표기값은 캡 적용
+    assert pre["BC"] is not None

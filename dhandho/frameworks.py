@@ -567,6 +567,7 @@ def score_buffett(m: dict, qual: dict | None = None) -> dict:
     b3 = _step(gms, [(0.01, 5), (0.0, 4), (-0.005, 3), (-0.02, 2)], 1) \
         if gms is not None else None
     bb = _mean_or_none([b1, b2, b3])
+    bb_precap = bb                           # 캡 적용 전 정량값(외부 정성 재결합용)
     moat_q = _qual_score(qual, "moat")
     if bb is not None:
         if moat_q is not None:
@@ -656,6 +657,10 @@ def score_buffett(m: dict, qual: dict | None = None) -> dict:
 
     return {"framework": "buffett_munger", "subscores": sub, "total": total,
             "mos_discount": round(mos, 3) if mos is not None else None,
+            # 캡 적용 전 정량값 — 사람이 정성 점수를 산정해 재결합할 때 사용:
+            # BB_new = (BB_precap + moat)/2, BC_new = (BC_precap + 자본배분)/2
+            "quant_precap": {"BB": round(bb_precap, 2) if bb_precap is not None else None,
+                             "BC": round(c1, 2) if c1 is not None else None},
             "gates": gates, "flags": r["flags"], "grade": grade}
 
 

@@ -18,6 +18,52 @@ from dhandho import (asymmetry, dart, frameworks, frameworks_ackman,
                      frameworks_lynch, gate, krx, market, metrics, notify, pit,
                      query_parser, report_format, report_labels, target_price)
 
+# 클로드 채팅 심층분석 프롬프트(저장소 prompts/) — 핸드오프 블록에 링크로 병기
+_PROMPT_BASE = "https://github.com/Be-idler/Signal-to-Buy/blob/main/prompts"
+
+# 스킴별 '정량 단계에서 미반영된 정성 항목'(=채팅이 재채점할 대상)
+_PENDING_QUAL = {
+    "dhandho": "B4 해자 · D2 급락원인 · D3 산업전망 · F1 자본배분 · F2 내부자 · F3 IR투명성",
+    "buffett": "moat 해자유형(BB) · capital_allocation 자본배분(BC) · G1 정직성(하드게이트) "
+               "· G2 능력범위",
+    "ltgg": "L3 해자확장성 · L4 경영진·문화·장기지향 · L6 비대칭 옵셔널리티",
+    "outsiders": "A2~A4 인수·매각 규율(OA) · C2~C4 경영진 독립성(OC) · E3~E4 디스카운트 "
+                 "해소(OE) · 자사주 취득·소각 자료(OB·OE) · E1 터널링(하드게이트)",
+    "lynch": "LA 스토리 명료성 · LD 시장의 무관심 · 재고 증가율 적신호(수동)",
+    "ackman": "촉매의 실현 주체·시한·강제력 재평가 (공시 원문 대조)",
+}
+
+
+def _handoff_lines(req: dict, basis: str, scores: dict, total, grade,
+                   gates: dict | None, extras: list[str],
+                   flags: list[str]) -> list[str]:
+    """클로드 채팅 핸드오프 블록 — 기계 판독용 정량 요약(프롬프트가 소비).
+
+    사람이 읽는 본문과 달리 하위점수 '코드'를 그대로 노출한다 — 프롬프트의
+    재합산 수식이 코드 기준이라 모호성 없이 대응돼야 한다.
+    """
+    scheme = req["scheme"]
+    L = [f"스킴={scheme}({req['scheme_label']}) · 종목={req['name']}({req['ticker']}) "
+         f"· 기준일={basis}"]
+    if scores:
+        line = "정량점수: " + " ".join(
+            f"{k}={v:.2f}" for k, v in scores.items() if v is not None)
+        if total is not None:
+            line += f" → 종합 {total:.2f}"
+        if grade:
+            line += f" · 등급 '{grade}'"
+        L.append(line)
+    if gates:
+        L.append("게이트: " + " · ".join(
+            f"{k}={'통과' if ok else '미달'}" for k, ok in gates.items()))
+    L += extras
+    L.append("재채점 대상(정성): " + _PENDING_QUAL[scheme])
+    if flags:
+        L.append("플래그(원시): " + ";".join(sorted(set(flags))))
+    L.append(f"프롬프트: {_PROMPT_BASE}/{scheme}.md")
+    return L
+
+
 _CHECKLIST_COMMON = [
     "최근 주가 부진이 일시적 악재인지, 구조적 문제인지 (공시·뉴스 원문으로 확인)",
     "경영진 이력과 내부자 지분 변동 (사업보고서 임원현황·소유보고)",
@@ -107,6 +153,16 @@ def analyze(req: dict) -> str:
         ctx["score_caveat"] = ("정성 항목(해자·급락 원인·산업 전망·자본배분·IR 투명성)은 "
                                "이번 분석에서 미반영되어 보수적으로 처리됐습니다. "
                                "최종 판단에는 사람의 확인이 필요합니다.")
+        qual_subs = " ".join(
+            f"{c}={secs[sec]['subscores'][c]['score']:.2f}"
+            for sec, c in (("B", "B4"), ("D", "D2"), ("D", "D3"),
+                           ("F", "F1"), ("F", "F2"), ("F", "F3")))
+        ho = {"scores": {k: secs[k]["total"] for k in "ABCDEF"},
+              "total": decision["total"], "grade": decision["verdict"],
+              "gates": {"A≥3.0": secs["A"]["total"] >= 3.0,
+                        "D≥3.0": secs["D"]["total"] >= 3.0},
+              "extras": [f"정성캡 하위점수(현재값): {qual_subs}",
+                         "섹션가중: A=.25 B=.20 C=.20 D=.15 E=.10 F=.10"]}
     elif scheme == "lynch":
         r = frameworks_lynch.score_lynch(m)
         ctx["headline"] = (f"피터 린치 관점에서 '{r['category']}' 유형으로 분류되며, "
@@ -127,6 +183,12 @@ def analyze(req: dict) -> str:
              report_labels.grade_word(v["score"])) for k, v in r["subscores"].items()]
         ctx["score_caveat"] = r["limits"]
         flags += r["flags"]
+        ho = {"scores": {k: v["score"] for k, v in r["subscores"].items()},
+              "total": r["score"], "grade": r["grade"],
+              "gates": {"LB≥3.0": r["subscores"]["LB"]["score"] >= 3.0},
+              "extras": [f"카테고리={r['category']} · PEG={_num(r.get('peg'))} "
+                         f"· 배당조정 린치지수={_num(r.get('peg_adj'))}",
+                         "섹션가중: LA=.15 LB=.30 LC=.20 LD=.15 LE=.20"]}
     elif scheme == "ackman":
         r = frameworks_ackman.score_ackman(m, disclosures)
         ctx["headline"] = (f"빌 애크먼 관점 종합 평가는 '{r['grade']}'입니다"
@@ -141,6 +203,9 @@ def analyze(req: dict) -> str:
                                   report_labels.grade_word(r["total"]))]
         ctx["score_caveat"] = r["limits"]
         flags += r["flags"]
+        ho = {"scores": {"quality": r["quality"], "catalyst": r["catalyst"]},
+              "total": r["total"], "grade": r["grade"], "gates": None,
+              "extras": [f"촉매 근거 {len(ev)}건 · 결합식: 총점=0.6×quality+0.4×catalyst"]}
     else:                                        # ltgg / outsiders / buffett
         r, bullets = _score_other(scheme, m)
         ctx["headline"] = (f"{req['scheme_label']} 관점 종합 평가는 '{r['grade']}'입니다"
@@ -154,6 +219,21 @@ def analyze(req: dict) -> str:
         ctx["score_caveat"] = ("정성 하위지표는 미반영되어 보수적으로 처리됐습니다. "
                                "근거 확보 후 재평가가 필요합니다.")
         flags += r.get("flags") or []
+        extras = {"ltgg": ["섹션가중: L1=.25 L2=.20 L3=.20 L4=.15 L5=.10 L6=.10"],
+                  "outsiders": [
+                      f"이원총점: 적용={r['total']:.2f} 해소가정={r.get('total_reform', 0) or 0:.2f}",
+                      "섹션가중: OA=.30 OB=.25 OC=.20 OD=.15 OE=.10 "
+                      "(해소가정: OA=.3333 OB=.2778 OC=.2222 OD=.1667)"],
+                  "buffett": ["섹션가중: BA=.15 BB=.25 BC=.20 BD=.20 BE=.20"]}[scheme]
+        if scheme == "buffett":
+            pre = r.get("quant_precap") or {}
+            extras.append("캡 이전 정량값: "
+                          + " ".join(f"{k}={_num(pre.get(k))}" for k in ("BB", "BC")))
+            if r.get("mos_discount") is not None:
+                extras.append(f"내재가치 할인율(MOS)={r['mos_discount']:.1%}")
+        ho = {"scores": {k: v["score"] for k, v in subs.items()},
+              "total": r["total"], "grade": r["grade"],
+              "gates": r.get("gates"), "extras": extras}
 
     evidence = (frameworks_ackman.catalyst_score(m, disclosures)[1]
                 if scheme in ("dhandho", "ackman") else [])
@@ -164,6 +244,7 @@ def analyze(req: dict) -> str:
     ctx["assumptions"] = tp["assumptions"]
     ctx["checklist"] = _CHECKLIST_COMMON + _CHECKLIST_SCHEME.get(scheme, [])
     ctx["data_status"] = report_labels.translate_flags(flags)
+    ctx["handoff"] = _handoff_lines(req, basis, flags=sorted(set(flags)), **ho)
     return report_format.build(req, ctx)
 
 

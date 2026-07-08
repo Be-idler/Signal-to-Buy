@@ -108,5 +108,12 @@ def build(req: dict, ctx: dict) -> str:
         L.append("\n■ 참고 (데이터 상태)")
         L += [f" · {s}" for s in ctx["data_status"]]
 
+    # 클로드 채팅 심층분석 핸드오프 — 이 리포트 전체를 스킴별 프롬프트와 함께
+    # 채팅에 붙여넣으면 정성 항목을 재채점해 최종 분석을 만들 수 있게 하는
+    # 기계 판독용 요약(하위점수 코드·게이트·재채점 대상·원시 플래그).
+    if ctx.get("handoff"):
+        L.append("\n■ 클로드 심층분석 핸드오프 (프롬프트와 함께 채팅에 붙여넣기)")
+        L += [f" {h}" for h in ctx["handoff"]]
+
     L.append("\n" + DISCLAIMER)
     return "\n".join(L)

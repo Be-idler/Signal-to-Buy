@@ -90,3 +90,8 @@ jobs:
             ARGS="$ARGS --basis $BASIS"
           fi
           python "run_${STAGE}.py" $ARGS
+      # 트랙3 워치리스트 — 트리거 A 직후 같은 런에서 점검(트리거 A가 방금 쓴 EOD 재사용).
+      # watchlist.yaml이 비어있으면 즉시 스킵되므로 무해하다.
+      - name: Watchlist (트랙3)
+        if: steps.stage.outputs.stage == 'trigger_a'
+        run: python run_watchlist.py

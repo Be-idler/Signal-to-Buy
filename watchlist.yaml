@@ -1,0 +1,41 @@
+# 트랙3 — 보유·관찰 종목 모니터링 (run_watchlist.py)
+#
+# 여기에 보유/관찰 종목과 조건부 트리거를 적으면 매 영업일 자동 점검한다.
+# 알림은 모두 '판단 재료'이며 매도·매수 지시가 아니다(최종 판단은 사람).
+# 비워두면 트랙3는 스킵된다.
+#
+# 필드:
+#   ticker        (필수) 종목코드 6자리
+#   name          (선택) 표시용 이름
+#   avg_price     (선택) 보유 평균단가 — 참고 표시용
+#   thesis        (선택) 투자 논지 한 줄
+#   invalidation  (선택) 무효화 조건(사람 판단 재료)
+#   triggers      (선택) 조건부 트리거 목록
+#     - type: price         가격 트리거(코드가 판정)
+#       price: 10000        기준가
+#       direction: below    below=이하 도달 시(분할매수) / above=이상 도달 시(목표가)
+#       note: "2차 트랜치"
+#     - type: fundamental   펀더멘털 트리거(코드가 자동판정 못 함 — 논지에만 기록)
+#       condition: "Q2 별도 흑자 확인 시"
+#       note: "3차 트랜치"
+#
+# 예시(주석 해제 후 사용):
+# - ticker: "006050"
+#   name: "국영지앤엠"
+#   avg_price: 1150
+#   thesis: "순현금 과다 · 밸류업 소각 촉매 대기"
+#   invalidation: "본업 적자 전환 또는 대주주 터널링 공시"
+#   triggers:
+#     - type: price
+#       price: 1000
+#       direction: below
+#       note: "2차 분할매수 트랜치"
+#     - type: price
+#       price: 1800
+#       direction: above
+#       note: "1차 이익실현 검토"
+#     - type: fundamental
+#       condition: "자기주식 소각 결정 공시"
+#       note: "촉매 확인 — 비중 확대 검토"
+
+watchlist: []

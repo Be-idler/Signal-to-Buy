@@ -233,6 +233,54 @@ def load_json(remote_path: str):
     return json.loads(data.decode()) if data else None
 
 
+def list_prefix(prefix: str) -> list[str]:
+    """원격 폴더(prefix) 하위 파일명 목록(폴더 제외). 없으면 빈 목록.
+
+    스코어카드가 prices/ 스냅샷 일자를 열거해 forward return 창을 잡는 데 쓴다.
+    """
+    folder_id = _resolve_folder(prefix.strip("/").split("/"), create=False)
+    if folder_id is None:
+        return []
+    names: list[str] = []
+    page_token = None
+    while True:
+        resp = _execute(_service().files().list(
+            q=f"'{folder_id}' in parents and trashed=false",
+            fields="nextPageToken,files(name,mimeType)",
+            pageSize=200, pageToken=page_token))
+        for f in resp.get("files", []):
+            if f["mimeType"] != "application/vnd.google-apps.folder":
+                names.append(f["name"])
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return names
+
+
+def auth_status() -> tuple[bool, str | None]:
+    """Drive 인증 헬스체크 — (정상?, 진단문구).
+
+    Google OAuth 앱이 Testing 상태면 refresh token이 7일 만에 만료될 수 있어
+    (Google 공식), 조용히 죽는 대신 즉시 원인을 짚어 경보하기 위한 프리플라이트.
+    토큰 만료/철회(invalid_grant)는 재발급 필요로 명시 분류한다.
+    """
+    global _service_cache
+    _service_cache = None                        # 캐시 우회 — 실제 자격 갱신을 시험
+    try:
+        # _execute로 감싸 일시 오류(503·타임아웃)는 재시도 — 프리플라이트가 순간
+        # 네트워크 blip에 오판해 하루 파이프라인을 통째로 중단시키지 않도록.
+        _execute(_service().files().list(pageSize=1, fields="files(id)"))
+        return True, None
+    except Exception as e:                        # noqa: BLE001
+        reason = str(e).lower()
+        if any(k in reason for k in ("invalid_grant", "token has been expired",
+                                     "refresh", "invalid_scope", "unauthorized")):
+            return False, ("Google Drive 인증 만료·철회 추정 — token.json 재발급 필요. "
+                           "(앱이 Testing 상태면 refresh token 7일 만료; drive.file "
+                           "스코프 앱을 Production 게시하면 만료 방지)")
+        return False, f"Google Drive 접근 실패: {str(e)[:200]}"
+
+
 def sync_prefix_to_local(prefix: str, local_dir: str | None = None) -> list[str]:
     """원격 폴더(prefix) 전체를 LOCAL_CACHE_DIR로 내려받아 로컬 경로 목록 반환.
 

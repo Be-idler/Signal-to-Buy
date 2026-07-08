@@ -22,4 +22,4 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install requests
-      - run: python scripts/krx_probe.py
+      - run: PYTHONPATH=. python scripts/krx_probe.py

@@ -4,8 +4,8 @@
 #   POST https://api.github.com/repos/Be-idler/Signal-to-Buy/dispatches
 #   · "Signal to Buy" 잡 (월–금 KST 17:30) → {"event_type":"signal-to-buy"} → trigger_a
 #   · "Signal notify" 잡 (화–토 KST 06:30) → {"event_type":"signal-notify"} → trigger_b
-# KRX 일별시세가 아직 미발행이면 trigger_a가 내부에서 최대 150분 폴링한다.
-# KRX 휴장일 여부는 run_trigger_a 내부에서 판정해 스킵한다.
+# 당일 KRX 일별시세가 미발행이면 trigger_a가 짧게 그레이스 폴링 후 최신 가용
+# 거래일로 폴백해 분석한다(발행 지연을 '휴장일'로 오판하지 않음).
 name: track1-daily
 
 on:
@@ -39,7 +39,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 200      # trigger_a: KRX 시세 발행 대기(최대 150분) + 파이프라인 여유
+    timeout-minutes: 120      # trigger_a 그레이스 폴링(~20분)·trigger_b 배치 대기(~60분) 여유
     env:
       DART_API_KEY: ${{ secrets.DART_API_KEY }}
       KRX_API_KEY: ${{ secrets.KRX_API_KEY }}

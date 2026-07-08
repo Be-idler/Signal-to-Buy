@@ -17,7 +17,7 @@ import time
 import traceback
 
 import config
-from dhandho import frameworks, gate, llm, notify, storage
+from dhandho import frameworks, gate, ledger, llm, notify, storage
 
 WAIT_MINUTES = 60          # 배치 미완료 시 최대 대기
 POLL_INTERVAL = 300
@@ -122,6 +122,14 @@ def main(argv: list[str] | None = None) -> int:
         storage.save_json(ckpt, f"checkpoints/trigger_a_{date_str}.json")
 
     try:
+        # ⓪ 인증 프리플라이트 — Drive 토큰 만료/철회면 조용히 죽지 않고 원인을 짚어 경보
+        ok, detail = storage.auth_status()
+        if not ok:
+            notify.send_bot1(notify.header_system(f"trigger_b 중단 — {detail}"))
+            print(f"[trigger_b] auth preflight failed: {detail}")
+            return 1
+
+        today = dt.date.today()
         if args.date:
             date_str = args.date
             ckpt = storage.load_json(f"checkpoints/trigger_a_{date_str}.json")
@@ -129,10 +137,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[trigger_b] no trigger_a checkpoint for {date_str} — skip")
                 return 0
         else:
-            found = _find_checkpoint(dt.date.today())
+            found = _find_checkpoint(today)
             if found is None:
                 print("[trigger_b] no unsent trigger_a checkpoint "
                       f"(최근 {CKPT_LOOKBACK_DAYS + 1}일, 휴장일?) — skip")
+                # 하트비트 — 무소식이 '휴장/신호없음'인지 '시스템 사망'인지 구분
+                notify.send_heartbeat(notify.header_heartbeat(today.strftime("%Y%m%d"))
+                                      + "\nB: 미발송 체크포인트 없음(휴장일·이미 발송)")
                 return 0
             date_str, ckpt = found
         finalists: dict = ckpt.get("finalists") or {}
@@ -151,12 +162,13 @@ def main(argv: list[str] | None = None) -> int:
             mark_sent(date_str, ckpt)
             return 0
 
-        # 종목명 맵 — 체크포인트에 name이 없으면 당일 EOD parquet에서 보충
+        # 종목명·종가 맵 — 원장에 종가를 남기려면 EOD parquet가 필요(항상 로드)
         names: dict = {}
-        if any(not e.get("name") for e in finalists.values()):
-            eod_df = storage.read_parquet(f"prices/eod_{date_str}.parquet")
-            if eod_df is not None:
-                names = dict(zip(eod_df["ticker"], eod_df["name"]))
+        closes: dict = {}
+        eod_df = storage.read_parquet(f"prices/eod_{date_str}.parquet")
+        if eod_df is not None:
+            names = dict(zip(eod_df["ticker"], eod_df["name"]))
+            closes = dict(zip(eod_df["ticker"], eod_df["close"]))
 
         # ⑤ 배치 결과 수신 (미완료 시 대기·재시도)
         qual_by_ticker: dict = {}
@@ -175,7 +187,10 @@ def main(argv: list[str] | None = None) -> int:
                 time.sleep(POLL_INTERVAL)
 
         # ⑥ 최종 게이트 → v1 알림 정책: BUY 우선, BUY 0건이면 그라운딩 숏리스트 폴백
+        recorded_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        basis = ckpt.get("fin_basis") or ckpt.get("basis")
         buys, digest_rows = [], []
+        scored: dict[str, dict] = {}   # 원장 적재용 종목별 (verdict, grounded, ...)
         for ticker, entry in sorted(finalists.items()):
             qual = qual_by_ticker.get(ticker) or {}
             result = frameworks.score_dhandho(
@@ -188,9 +203,12 @@ def main(argv: list[str] | None = None) -> int:
                 {"date": date_str, "result": result, "decision": decision,
                  "qual": qual},
                 f"signals/{date_str}_{ticker}.json")
+            grounded = bool(qual) and not qual.get("_error")
+            scored[ticker] = {"entry": entry, "result": result, "decision": decision,
+                              "grounded": grounded, "qual": qual}
             if decision["verdict"] == "BUY":
                 buys.append(_format_buy(ticker, entry, decision, result, names))
-            if qual and not qual.get("_error"):     # 그라운딩된 종목만 폴백 대상
+            if grounded:                             # 그라운딩된 종목만 폴백 대상
                 digest_rows.append(_format_digest_row(ticker, entry, decision,
                                                       qual, entry["metrics"], names))
 
@@ -202,6 +220,31 @@ def main(argv: list[str] | None = None) -> int:
                 [header + "\n(BUY 0건 — 그라운딩 숏리스트 폴백)"] + digest_rows))
         else:
             send(notify.header_daily(date_str) + "\nBUY 0건, 그라운딩 종목 없음")
+
+        # 신호 원장 — 채점된 finalists 전부 적재(BUY만이 아니라 WATCH·PASS도:
+        # 나중에 점수 구간별 히트율을 계산하려면 탈락분도 있어야 한다). surfaced는
+        # 실제 메시지 노출 여부(BUY 발송 시 BUY만, 폴백 발송 시 그라운딩 종목).
+        rows = []
+        for ticker, s in scored.items():
+            verdict = s["decision"]["verdict"]
+            surfaced = (verdict == "BUY") if buys else (s["grounded"] if digest_rows else False)
+            evidence = [d.get("rcept_no") for d in (s["entry"].get("disclosures") or [])
+                        if d.get("rcept_no")]
+            rows.append(ledger.build_row(
+                date=date_str, basis=basis, ticker=ticker,
+                name=s["entry"].get("name") or names.get(ticker),
+                signal_type=verdict, surfaced=surfaced,
+                result=s["result"], decision=s["decision"],
+                rsi=s["entry"].get("rsi"), close=closes.get(ticker),
+                mktcap=(s["entry"].get("metrics") or {}).get("mktcap"),
+                market_ctx=s["entry"].get("market_context"),
+                evidence=evidence, recorded_at=recorded_at))
+        try:
+            total = ledger.append(date_str, rows)
+            print(f"[trigger_b] 신호 원장 {len(rows)}건 적재 (누적 {total}행)")
+        except Exception as e:                       # noqa: BLE001 — 원장 실패는 발송을 막지 않음
+            print(f"[trigger_b] 신호 원장 적재 실패(무시): {e}")
+
         mark_sent(date_str, ckpt)
         print(f"[trigger_b] BUY {len(buys)} / digest {len(digest_rows)}")
         return 0

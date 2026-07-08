@@ -34,6 +34,7 @@ WORKERS = int(os.environ.get("QUARTERLY_WORKERS", "4"))
 MAX_RUNTIME_MIN = float(os.environ.get("MAX_RUNTIME_MIN", "320"))
 CONTINUE_MARKER = ".continue_needed"
 CORP_CODES_CACHE = "meta/corp_codes.json"
+COVERAGE_ALERT_THRESHOLD = 0.95     # 적재율 < 95%면 커버리지 경보
 _START = time.monotonic()
 
 
@@ -138,6 +139,15 @@ def collect(year: int, reprt_code: str) -> int | None:
     storage.upload_parquet(df, f"financials/{year}_{reprt_code}.parquet")
     storage.save_json({"done": sorted(done), "rows": []}, ckpt_path)   # 완료 표시(행 비움)
     print(f"[quarterly] uploaded financials/{year}_{reprt_code}.parquet ({len(df)} rows)")
+
+    # 커버리지 경보 — 적재율이 낮으면 조용한 부분적재(네트워크·한도)일 수 있음
+    universe = len(corp_codes) or 1
+    coverage = len(df) / universe
+    if coverage < COVERAGE_ALERT_THRESHOLD:
+        notify.send_bot1(notify.header_system(
+            f"적재 커버리지 경고: {year}_{reprt_code} {len(df)}/{universe}"
+            f" ({coverage:.0%}) < {COVERAGE_ALERT_THRESHOLD:.0%} — "
+            f"--recollect 실행 권장(무자료 제외 후에도 낮으면 부분적재 의심)"))
     return len(df)
 
 

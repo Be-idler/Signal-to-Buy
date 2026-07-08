@@ -177,9 +177,18 @@ def main(argv: list[str] | None = None) -> int:
              else dt.date.today())
     date_str = today.strftime("%Y%m%d")
     try:
+        # ⓪ 인증 프리플라이트 — Drive 토큰 만료/철회면 조용히 죽지 않고 원인을 짚어 경보
+        ok, detail = storage.auth_status()
+        if not ok:
+            notify.send_bot1(notify.header_system(f"trigger_a 중단 — {detail}"))
+            print(f"[trigger_a] auth preflight failed: {detail}")
+            return 1
+
         # ① EOD 수집 (휴장일 스킵)
         if not _await_trading_data(date_str, is_backfill=bool(args.date)):
             print(f"[trigger_a] {date_str} is not a trading day — skip")
+            notify.send_heartbeat(notify.header_heartbeat(date_str)
+                                  + "\nA: 휴장일 스킵(시세 없음)")
             return 0
         eod, snapshots = krx.get_all_eod(days=config.EOD_LOOKBACK_DAYS, end_date=today)
         snap_df = pd.DataFrame(snapshots[date_str])
@@ -295,6 +304,13 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint["finalists"] = _jsonable(finalists)
         storage.save_json(checkpoint, f"checkpoints/trigger_a_{date_str}.json")
         print(f"[trigger_a] checkpoint saved for {date_str}")
+
+        # 하트비트 — A단계 생존 확인(후보→통과→배치). B는 익일 이 체크포인트로 발송.
+        notify.send_heartbeat(
+            notify.header_heartbeat(date_str)
+            + f"\nA: RSI후보 {len(oversold)} → 정량통과 {len(finalists)}"
+            + (f" → 배치제출 {len(checkpoint.get('llm_targets') or [])}"
+               if checkpoint.get("batch_id") else " → 배치 없음(통과 0)"))
         return 0
     except Exception:
         notify.notify_failure("trigger_a", traceback.format_exc())

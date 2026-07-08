@@ -18,6 +18,8 @@ _MAX_LEN = 4000   # 텔레그램 메시지 한도(4096)에 여유
 HEADER_ALERT = "📋 단도투자 RSI<30 스크리닝"    # 봇1: 일일 신호
 HEADER_RANK = "📋 다관점 프레임워크 랭킹"        # 봇2: 격주 랭킹
 HEADER_SYSTEM = "⚠️ [시스템]"                    # 운영 경고·실패 통보
+HEADER_HEARTBEAT = "💓 [하트비트]"               # 파이프라인 생존 확인(무소식≠사망 구분)
+HEADER_WATCH = "👁 보유·관찰 모니터링"           # 트랙3: 워치리스트 알림
 
 
 def fmt_date(yyyymmdd: str) -> str:
@@ -39,6 +41,21 @@ def header_biweekly(date: str) -> str:
 def header_system(message: str) -> str:
     """시스템 경고."""
     return f"{HEADER_SYSTEM} {message}"
+
+
+def header_heartbeat(date: str) -> str:
+    """파이프라인 생존 확인 — 매 실행 1줄 요약(무소식=신호없음 vs 무소식=사망 구분)."""
+    return f"{HEADER_HEARTBEAT} {fmt_date(date)}"
+
+
+def header_watch(date: str) -> str:
+    """트랙3 — 보유·관찰 종목 모니터링."""
+    return f"{HEADER_WATCH} {fmt_date(date)}"
+
+
+def send_heartbeat(text: str) -> bool:
+    """봇1 채널로 하트비트 발송(일일 신호와 같은 방으로 — 생존 신호가 한곳에 모임)."""
+    return send_bot1(text)
 
 
 def _send(token: str, chat_id: str, text: str) -> bool:

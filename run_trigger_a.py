@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import math
+import os
 import sys
 import time
 import traceback
@@ -26,11 +27,11 @@ import config
 from dhandho import (dart, frameworks, gate, krx, llm, market, metrics, notify,
                      rsi, storage)
 
-# 당일 실행 시 KRX 시세 발행 지연 대기(휴장일과 미발행을 구분할 수 없어 폴링).
-# 외부 크론이 KST 17:30에 시작하는데 KRX 일별시세는 통상 저녁(~20:00)에
-# 발행되므로 최대 150분(= KST 20:00까지) 기다린 뒤 휴장일로 판정한다.
-EOD_WAIT_MINUTES = 150
-EOD_POLL_SECONDS = 600
+# 당일 KRX 일별시세가 아직 미발행일 수 있어(KST 17:30 크론 시점엔 종종 미발행)
+# 짧게 그레이스 폴링한 뒤, 그래도 없으면 '휴장일'로 오판하지 않고 최신 가용
+# 거래일로 폴백해 분석한다(질의·워치리스트 경로와 동일한 '최근 거래일' 규칙).
+EOD_GRACE_MINUTES = int(os.environ.get("EOD_GRACE_MINUTES", "20"))
+EOD_POLL_SECONDS = 300
 
 # 최신 보고서 parquet가 이보다 적으면 미완성 적재(빈 파일·부분 적재)로 간주하고
 # 직전 보고서로 폴백한다(상장 전종목 정상 적재는 ~2,700행).
@@ -144,28 +145,42 @@ def _load_financials(today: dt.date, basis: str | None = None,
     return fin_by_ticker, history_by_ticker, corp_by_ticker, fin_basis
 
 
-def _await_trading_data(date_str: str, is_backfill: bool) -> bool:
-    """KRX 시세 존재 확인 — 당일 실행이면 발행 지연을 기다린다.
+def _resolve_basis(today: dt.date, is_backfill: bool) -> tuple[str | None, str]:
+    """실행 기준 거래일 확정. 반환 (basis_YYYYMMDD | None, note). None=스킵.
 
-    과거 일자(백필·테스트)는 데이터가 이미 확정돼 있어 즉시 판정한다.
-    당일 평일인데 시세가 없으면 발행 지연일 수 있어 최대 EOD_WAIT_MINUTES 폴링하고,
-    끝내 없으면 휴장일로 간주하되 시스템 메시지로 알린다(무단 스킵 방지).
+    - 백필(--date): 그 날짜에 시세가 있으면 그대로, 없으면 스킵.
+    - 정기 실행: 당일 시세를 짧게 그레이스 폴링(곧 발행될 수 있음) → 있으면 당일.
+      끝내 미발행이면 '휴장일'로 오판하지 않고 **최신 가용 거래일**로 폴백한다
+      (KRX 발행 지연 대응). 단 그 거래일이 이미 분석됐으면(체크포인트 존재) 스킵 —
+      매일 저녁 직전 거래일을 재분석하는 낭비·중복 발송을 막는다.
     """
-    if krx.is_trading_day(date_str):
-        return True
-    d = dt.datetime.strptime(date_str, "%Y%m%d").date()
-    if is_backfill or d.weekday() >= 5:
-        return False
-    deadline = time.time() + EOD_WAIT_MINUTES * 60
-    while time.time() < deadline:
-        print(f"[trigger_a] {date_str} KRX 시세 미발행 — {EOD_POLL_SECONDS}s 후 재확인")
-        time.sleep(EOD_POLL_SECONDS)
+    date_str = today.strftime("%Y%m%d")
+    if is_backfill:
+        return (date_str, "지정일") if krx.is_trading_day(date_str) else \
+               (None, f"{date_str} 시세 없음(백필 대상 아님)")
+
+    deadline = time.time() + EOD_GRACE_MINUTES * 60
+    while True:
         if krx.is_trading_day(date_str):
-            return True
-    notify.send_bot1(notify.header_system(
-        f"{notify.fmt_date(date_str)} KRX 시세 미발행({EOD_WAIT_MINUTES}분 대기) — "
-        f"휴장일로 간주하고 스킵"))
-    return False
+            return date_str, "당일"
+        if time.time() >= deadline:
+            break
+        print(f"[trigger_a] {date_str} KRX 시세 미발행 — {EOD_POLL_SECONDS}s 후 재확인"
+              f"(그레이스 {EOD_GRACE_MINUTES}분)")
+        time.sleep(EOD_POLL_SECONDS)
+
+    try:
+        avail = krx.recent_trading_days(today, 1)
+    except Exception as e:                        # noqa: BLE001
+        return None, f"KRX 조회 실패: {e}"
+    basis = avail[-1] if avail else None
+    if not basis:
+        return None, "최근 거래일 데이터 없음(KRX 무응답 의심)"
+    if basis == date_str:
+        return date_str, "당일"
+    if storage.load_json(f"checkpoints/trigger_a_{basis}.json") is not None:
+        return None, f"당일({date_str}) 시세 미발행 · 최신 거래일 {basis} 이미 분석됨"
+    return basis, f"당일({date_str}) 시세 미발행 → 최신 거래일 {basis} 기준 분석"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -185,12 +200,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[trigger_a] auth preflight failed: {detail}")
             return 1
 
-        # ① EOD 수집 (휴장일 스킵)
-        if not _await_trading_data(date_str, is_backfill=bool(args.date)):
-            print(f"[trigger_a] {date_str} is not a trading day — skip")
-            notify.send_heartbeat(notify.header_heartbeat(date_str)
-                                  + "\nA: 휴장일 스킵(시세 없음)")
+        # ① 기준 거래일 확정 (당일 미발행이면 최신 가용 거래일로 폴백)
+        basis, note = _resolve_basis(today, is_backfill=bool(args.date))
+        if basis is None:
+            print(f"[trigger_a] skip — {note}")
+            notify.send_heartbeat(notify.header_heartbeat(date_str) + f"\nA: {note}")
             return 0
+        if basis != date_str:
+            print(f"[trigger_a] {note}")
+            today = dt.datetime.strptime(basis, "%Y%m%d").date()
+            date_str = basis
         eod, snapshots = krx.get_all_eod(days=config.EOD_LOOKBACK_DAYS, end_date=today)
         snap_df = pd.DataFrame(snapshots[date_str])
         storage.upload_parquet(snap_df, f"prices/eod_{date_str}.parquet")
@@ -307,11 +326,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[trigger_a] checkpoint saved for {date_str}")
 
         # 하트비트 — A단계 생존 확인(후보→통과→배치). B는 익일 이 체크포인트로 발송.
+        lag = "" if note == "당일" else f"\n({note})"
         notify.send_heartbeat(
             notify.header_heartbeat(date_str)
             + f"\nA: RSI후보 {len(oversold)} → 정량통과 {len(finalists)}"
             + (f" → 배치제출 {len(checkpoint.get('llm_targets') or [])}"
-               if checkpoint.get("batch_id") else " → 배치 없음(통과 0)"))
+               if checkpoint.get("batch_id") else " → 배치 없음(통과 0)")
+            + lag)
         return 0
     except Exception:
         notify.notify_failure("trigger_a", traceback.format_exc())

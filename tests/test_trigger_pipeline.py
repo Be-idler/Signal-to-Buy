@@ -1,9 +1,54 @@
-"""트리거 B 체크포인트 소급 탐색(크론 지연 대비) 테스트."""
+"""트리거 A 기준일 확정·트리거 B 체크포인트 소급 탐색 테스트."""
 import datetime as dt
 
+import run_trigger_a
 import run_trigger_b
 
 TODAY = dt.date(2026, 7, 7)
+
+
+# ───────────────────────────── trigger_a 기준일 확정 (발행 지연 폴백)
+
+def test_resolve_basis_uses_today_when_published(monkeypatch):
+    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: d == "20260708")
+    basis, note = run_trigger_a._resolve_basis(dt.date(2026, 7, 8), is_backfill=False)
+    assert basis == "20260708" and note == "당일"
+
+
+def test_resolve_basis_falls_back_to_latest_available(monkeypatch):
+    # 당일(7/8) 시세 미발행 → 최신 가용 거래일(7/7)로 폴백, 아직 미분석
+    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: False)
+    monkeypatch.setattr(run_trigger_a.krx, "recent_trading_days",
+                        lambda today, n: ["20260707"])
+    monkeypatch.setattr(run_trigger_a.storage, "load_json", lambda p: None)
+    monkeypatch.setattr(run_trigger_a, "EOD_GRACE_MINUTES", 0)
+    basis, note = run_trigger_a._resolve_basis(dt.date(2026, 7, 8), is_backfill=False)
+    assert basis == "20260707" and "최신 거래일 20260707" in note
+
+
+def test_resolve_basis_skips_when_latest_already_analyzed(monkeypatch):
+    # 7/8 미발행, 최신 거래일 7/7이 이미 분석됨(체크포인트 존재) → 스킵(중복 방지)
+    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: False)
+    monkeypatch.setattr(run_trigger_a.krx, "recent_trading_days",
+                        lambda today, n: ["20260707"])
+    monkeypatch.setattr(run_trigger_a.storage, "load_json", lambda p: {"date": "20260707"})
+    monkeypatch.setattr(run_trigger_a, "EOD_GRACE_MINUTES", 0)
+    basis, note = run_trigger_a._resolve_basis(dt.date(2026, 7, 8), is_backfill=False)
+    assert basis is None and "이미 분석됨" in note
+
+
+def test_resolve_basis_none_when_krx_silent(monkeypatch):
+    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: False)
+    monkeypatch.setattr(run_trigger_a.krx, "recent_trading_days", lambda today, n: [])
+    monkeypatch.setattr(run_trigger_a, "EOD_GRACE_MINUTES", 0)
+    basis, note = run_trigger_a._resolve_basis(dt.date(2026, 7, 8), is_backfill=False)
+    assert basis is None and "KRX 무응답" in note
+
+
+def test_resolve_basis_backfill_requires_that_day(monkeypatch):
+    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: d == "20260706")
+    assert run_trigger_a._resolve_basis(dt.date(2026, 7, 6), is_backfill=True)[0] == "20260706"
+    assert run_trigger_a._resolve_basis(dt.date(2026, 7, 5), is_backfill=True)[0] is None
 
 
 def test_find_checkpoint_prefers_today(monkeypatch):

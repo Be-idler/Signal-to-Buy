@@ -267,7 +267,9 @@ def auth_status() -> tuple[bool, str | None]:
     global _service_cache
     _service_cache = None                        # 캐시 우회 — 실제 자격 갱신을 시험
     try:
-        _service().files().list(pageSize=1, fields="files(id)").execute()
+        # _execute로 감싸 일시 오류(503·타임아웃)는 재시도 — 프리플라이트가 순간
+        # 네트워크 blip에 오판해 하루 파이프라인을 통째로 중단시키지 않도록.
+        _execute(_service().files().list(pageSize=1, fields="files(id)"))
         return True, None
     except Exception as e:                        # noqa: BLE001
         reason = str(e).lower()

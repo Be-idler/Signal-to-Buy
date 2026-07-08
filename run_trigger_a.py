@@ -140,7 +140,8 @@ def _load_financials(today: dt.date, basis: str | None = None,
             t = d.get("ticker")
             if t in history_by_ticker:
                 history_by_ticker[t].append(d)
-    return fin_by_ticker, history_by_ticker, corp_by_ticker
+    fin_basis = f"{latest_year}_{latest_reprt}"     # 신호 원장 귀속용(어느 보고서 기준인지)
+    return fin_by_ticker, history_by_ticker, corp_by_ticker, fin_basis
 
 
 def _await_trading_data(date_str: str, is_backfill: bool) -> bool:
@@ -200,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[trigger_a] RSI<{config.RSI_THRESHOLD} + 유동성 필터: {len(oversold)} candidates")
 
         # ③ 분기 재무 + 당일 시총 결합 (전 종목 — peer pool 산출에도 필요)
-        fin_by_ticker, history, corp_by = _load_financials(today, basis=args.basis)
+        fin_by_ticker, history, corp_by, fin_basis = _load_financials(today, basis=args.basis)
         overlap = len(set(oversold) & set(fin_by_ticker))
         print(f"[trigger_a] 재무 {len(fin_by_ticker)}종목 / EOD {len(eod)}종목 / "
               f"RSI 후보∩재무 {overlap}종목")
@@ -262,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
                 finalists[t]["market_context"] = ctx
 
         checkpoint = {"date": date_str, "finalists": {}, "batch_id": None,
-                      "oversold_count": len(oversold),
+                      "fin_basis": fin_basis, "oversold_count": len(oversold),
                       "near_misses": _jsonable(near_misses),
                       "peers_size": {k: len(v) for k, v in peers.items()}}
 

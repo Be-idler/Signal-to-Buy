@@ -34,7 +34,10 @@ WORKERS = int(os.environ.get("QUARTERLY_WORKERS", "4"))
 MAX_RUNTIME_MIN = float(os.environ.get("MAX_RUNTIME_MIN", "320"))
 CONTINUE_MARKER = ".continue_needed"
 CORP_CODES_CACHE = "meta/corp_codes.json"
-COVERAGE_ALERT_THRESHOLD = 0.95     # 적재율 < 95%면 커버리지 경보
+# 커버리지 경보: DART 유니버스(corp_codes)에는 비상장·펀드·무자료 법인이 많아
+# 정상 적재도 유니버스 대비 ~68%뿐이다(실측 2026 Q1: 2,702/3,976). 따라서
+# 유니버스 비율이 아니라 '적재 행수 절대 하한'으로 조용한 빈/부분적재를 잡는다.
+COVERAGE_MIN_ROWS = int(os.environ.get("COVERAGE_MIN_ROWS", "1500"))
 _START = time.monotonic()
 
 
@@ -140,14 +143,12 @@ def collect(year: int, reprt_code: str) -> int | None:
     storage.save_json({"done": sorted(done), "rows": []}, ckpt_path)   # 완료 표시(행 비움)
     print(f"[quarterly] uploaded financials/{year}_{reprt_code}.parquet ({len(df)} rows)")
 
-    # 커버리지 경보 — 적재율이 낮으면 조용한 부분적재(네트워크·한도)일 수 있음
-    universe = len(corp_codes) or 1
-    coverage = len(df) / universe
-    if coverage < COVERAGE_ALERT_THRESHOLD:
+    # 커버리지 경보 — 적재 행수가 하한 미만이면 조용한 빈/부분적재(네트워크·한도) 의심
+    if len(df) < COVERAGE_MIN_ROWS:
         notify.send_bot1(notify.header_system(
-            f"적재 커버리지 경고: {year}_{reprt_code} {len(df)}/{universe}"
-            f" ({coverage:.0%}) < {COVERAGE_ALERT_THRESHOLD:.0%} — "
-            f"--recollect 실행 권장(무자료 제외 후에도 낮으면 부분적재 의심)"))
+            f"적재 커버리지 경고: {year}_{reprt_code} {len(df)}행 "
+            f"< 하한 {COVERAGE_MIN_ROWS}행 (유니버스 {len(corp_codes)}) — "
+            f"빈/부분적재 의심, --recollect 실행 권장"))
     return len(df)
 
 

@@ -87,6 +87,15 @@ def recent_trading_days(end_date: dt.date, count: int) -> list[str]:
     return list(reversed(days))
 
 
+def kst_today() -> dt.date:
+    """현재 KST 날짜. 러너가 UTC라도 한국 장 기준일을 정확히 잡는다.
+
+    트랙1 크론은 KST 08:05(=UTC 23:05 전일)에 발화하므로, UTC 날짜를 그대로 쓰면
+    기준일이 하루 어긋난다(월→금 대신 금→목 등). 반드시 KST로 환산해 앵커한다.
+    """
+    return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=9)).date()
+
+
 def prev_weekday(d: dt.date) -> dt.date:
     """d 이전(당일 제외) 가장 최근 평일(월~금). 휴장 여부는 보지 않는다."""
     d -= dt.timedelta(days=1)

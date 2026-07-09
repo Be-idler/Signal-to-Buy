@@ -147,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[trigger_b] auth preflight failed: {detail}")
             return 1
 
-        today = dt.date.today()
+        today = krx.kst_today()                   # UTC 러너라도 KST 기준일로 앵커
         if args.date:
             date_str = args.date
             ckpt = storage.load_json(f"checkpoints/trigger_a_{date_str}.json")

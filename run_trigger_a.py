@@ -194,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
                                     "재수집 중 부분 적재 회피·백테스트용")
     args = ap.parse_args(argv)
     today = (dt.datetime.strptime(args.date, "%Y%m%d").date() if args.date
-             else dt.date.today())
+             else krx.kst_today())              # UTC 러너라도 KST 기준일로 앵커
     date_str = today.strftime("%Y%m%d")
     try:
         # ⓪ 인증 프리플라이트 — Drive 토큰 만료/철회면 조용히 죽지 않고 원인을 짚어 경보

@@ -17,11 +17,12 @@ import time
 import traceback
 
 import config
-from dhandho import frameworks, gate, ledger, llm, notify, storage
+from dhandho import frameworks, gate, krx, ledger, llm, notify, storage
 
 WAIT_MINUTES = 60          # 배치 미완료 시 최대 대기
 POLL_INTERVAL = 300
-CKPT_LOOKBACK_DAYS = 2     # 크론 지연 대비 체크포인트 소급 탐색 범위
+CKPT_LOOKBACK_SESSIONS = 3   # 전영업일부터 최대 N 거래일 소급(미실행 만회)
+CKPT_LOOKBACK_DAYS = 5       # KRX 장애 시 달력 기준 폴백 범위(연휴 대비)
 
 
 def _drop_reason(qual: dict, entry: dict, m: dict) -> str:
@@ -96,13 +97,30 @@ def _format_digest_row(ticker: str, entry: dict, decision: dict, qual: dict,
 
 
 def _find_checkpoint(today: dt.date) -> tuple[str, dict] | None:
-    """오늘부터 최대 CKPT_LOOKBACK_DAYS 거슬러 미발송 체크포인트 탐색."""
-    for back in range(CKPT_LOOKBACK_DAYS + 1):
-        d = (today - dt.timedelta(days=back)).strftime("%Y%m%d")
-        ckpt = storage.load_json(f"checkpoints/trigger_a_{d}.json")
-        if ckpt is not None and not ckpt.get("signal_sent"):
-            return d, ckpt
-    return None
+    """전영업일부터 거래일 단위로 소급하며 미발송 체크포인트 탐색.
+
+    trigger_a와 **동일한 '전영업일' 기준**으로 basis를 잡아 같은 체크포인트를 집는다
+    (연휴로 basis가 며칠 전이어도 정확히 대응). KRX 조회 실패 시 달력 기준 폴백.
+    """
+    try:
+        anchor = today
+        for _ in range(CKPT_LOOKBACK_SESSIONS):
+            basis = krx.previous_trading_session(anchor)
+            if basis is None:
+                break
+            ckpt = storage.load_json(f"checkpoints/trigger_a_{basis}.json")
+            if ckpt is not None and not ckpt.get("signal_sent"):
+                return basis, ckpt
+            anchor = dt.date(int(basis[:4]), int(basis[4:6]), int(basis[6:8]))
+        return None
+    except Exception as e:                        # noqa: BLE001 — KRX 장애 시 달력 폴백
+        print(f"[trigger_b] KRX 조회 실패, 달력 기준 폴백: {e}")
+        for back in range(1, CKPT_LOOKBACK_DAYS + 1):
+            d = (today - dt.timedelta(days=back)).strftime("%Y%m%d")
+            ckpt = storage.load_json(f"checkpoints/trigger_a_{d}.json")
+            if ckpt is not None and not ckpt.get("signal_sent"):
+                return d, ckpt
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -129,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[trigger_b] auth preflight failed: {detail}")
             return 1
 
-        today = dt.date.today()
+        today = krx.kst_today()                   # UTC 러너라도 KST 기준일로 앵커
         if args.date:
             date_str = args.date
             ckpt = storage.load_json(f"checkpoints/trigger_a_{date_str}.json")
@@ -140,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
             found = _find_checkpoint(today)
             if found is None:
                 print("[trigger_b] no unsent trigger_a checkpoint "
-                      f"(최근 {CKPT_LOOKBACK_DAYS + 1}일, 휴장일?) — skip")
+                      f"(최근 {CKPT_LOOKBACK_SESSIONS}거래일, 휴장일?) — skip")
                 # 하트비트 — 무소식이 '휴장/신호없음'인지 '시스템 사망'인지 구분
                 notify.send_heartbeat(notify.header_heartbeat(today.strftime("%Y%m%d"))
                                       + "\nB: 미발송 체크포인트 없음(휴장일·이미 발송)")

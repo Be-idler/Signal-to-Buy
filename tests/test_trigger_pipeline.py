@@ -1,48 +1,69 @@
-"""트리거 A 기준일 확정·트리거 B 체크포인트 소급 탐색 테스트."""
+"""트리거 A 전영업일 확정·트리거 B 체크포인트 소급 탐색 테스트."""
 import datetime as dt
 
 import run_trigger_a
 import run_trigger_b
+from dhandho import krx
 
-TODAY = dt.date(2026, 7, 7)
-
-
-# ───────────────────────────── trigger_a 기준일 확정 (발행 지연 폴백)
-
-def test_resolve_basis_uses_today_when_published(monkeypatch):
-    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: d == "20260708")
-    basis, note = run_trigger_a._resolve_basis(dt.date(2026, 7, 8), is_backfill=False)
-    assert basis == "20260708" and note == "당일"
+# 2026-07-07(화)·07-08(수)·07-10(금)·07-13(월) — 요일 앵커
+TODAY = dt.date(2026, 7, 8)          # 수요일
 
 
-def test_resolve_basis_falls_back_to_latest_available(monkeypatch):
-    # 당일(7/8) 시세 미발행 → 최신 가용 거래일(7/7)로 폴백, 아직 미분석
+# ───────────────────────────── krx 전영업일 프리미티브
+
+def test_prev_weekday_skips_weekend():
+    assert krx.prev_weekday(dt.date(2026, 7, 8)) == dt.date(2026, 7, 7)   # 수→화
+    assert krx.prev_weekday(dt.date(2026, 7, 13)) == dt.date(2026, 7, 10)  # 월→금
+
+
+def test_previous_trading_session(monkeypatch):
+    monkeypatch.setattr(krx, "recent_trading_days",
+                        lambda end, n: ["20260707"] if end == dt.date(2026, 7, 7) else [])
+    assert krx.previous_trading_session(dt.date(2026, 7, 8)) == "20260707"
+
+
+# ───────────────────────────── trigger_a 전영업일 확정
+
+def test_resolve_basis_prev_weekday_when_published(monkeypatch):
+    # 수요일 실행 → 전영업일 화(20260707) 시세 발행됨 → basis=화
+    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: d == "20260707")
+    monkeypatch.setattr(run_trigger_a.storage, "load_json", lambda p: None)
+    basis, note = run_trigger_a._resolve_basis(TODAY, is_backfill=False)
+    assert basis == "20260707" and "전영업일 20260707" in note
+
+
+def test_resolve_basis_monday_uses_friday(monkeypatch):
+    # 월요일 실행 → 전영업일 금(20260710)
+    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: d == "20260710")
+    monkeypatch.setattr(run_trigger_a.storage, "load_json", lambda p: None)
+    basis, _ = run_trigger_a._resolve_basis(dt.date(2026, 7, 13), is_backfill=False)
+    assert basis == "20260710"
+
+
+def test_resolve_basis_holiday_walks_back(monkeypatch):
+    # 전영업일 화가 휴장(시세 없음) → 그 이전 거래일 월(20260706)로 소급
     monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: False)
     monkeypatch.setattr(run_trigger_a.krx, "recent_trading_days",
-                        lambda today, n: ["20260707"])
+                        lambda end, n: ["20260706"])
     monkeypatch.setattr(run_trigger_a.storage, "load_json", lambda p: None)
     monkeypatch.setattr(run_trigger_a, "EOD_GRACE_MINUTES", 0)
-    basis, note = run_trigger_a._resolve_basis(dt.date(2026, 7, 8), is_backfill=False)
-    assert basis == "20260707" and "최신 거래일 20260707" in note
+    basis, note = run_trigger_a._resolve_basis(TODAY, is_backfill=False)
+    assert basis == "20260706" and "휴장" in note and "직전 거래일 20260706" in note
 
 
-def test_resolve_basis_skips_when_latest_already_analyzed(monkeypatch):
-    # 7/8 미발행, 최신 거래일 7/7이 이미 분석됨(체크포인트 존재) → 스킵(중복 방지)
-    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: False)
-    monkeypatch.setattr(run_trigger_a.krx, "recent_trading_days",
-                        lambda today, n: ["20260707"])
+def test_resolve_basis_skips_when_already_analyzed(monkeypatch):
+    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: d == "20260707")
     monkeypatch.setattr(run_trigger_a.storage, "load_json", lambda p: {"date": "20260707"})
-    monkeypatch.setattr(run_trigger_a, "EOD_GRACE_MINUTES", 0)
-    basis, note = run_trigger_a._resolve_basis(dt.date(2026, 7, 8), is_backfill=False)
+    basis, note = run_trigger_a._resolve_basis(TODAY, is_backfill=False)
     assert basis is None and "이미 분석됨" in note
 
 
-def test_resolve_basis_none_when_krx_silent(monkeypatch):
+def test_resolve_basis_none_when_no_data(monkeypatch):
     monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: False)
-    monkeypatch.setattr(run_trigger_a.krx, "recent_trading_days", lambda today, n: [])
+    monkeypatch.setattr(run_trigger_a.krx, "recent_trading_days", lambda end, n: [])
     monkeypatch.setattr(run_trigger_a, "EOD_GRACE_MINUTES", 0)
-    basis, note = run_trigger_a._resolve_basis(dt.date(2026, 7, 8), is_backfill=False)
-    assert basis is None and "KRX 무응답" in note
+    basis, note = run_trigger_a._resolve_basis(TODAY, is_backfill=False)
+    assert basis is None and "시세 없음" in note
 
 
 def test_resolve_basis_backfill_requires_that_day(monkeypatch):
@@ -51,25 +72,25 @@ def test_resolve_basis_backfill_requires_that_day(monkeypatch):
     assert run_trigger_a._resolve_basis(dt.date(2026, 7, 5), is_backfill=True)[0] is None
 
 
-def test_find_checkpoint_prefers_today(monkeypatch):
-    store = {
-        "checkpoints/trigger_a_20260707.json": {"finalists": {"005930": {}}},
-        "checkpoints/trigger_a_20260706.json": {"finalists": {}},
-    }
+# ───────────────────────────── trigger_b 체크포인트 소급 (전영업일 기준)
+
+def _sessions(monkeypatch, chain: dict):
+    """previous_trading_session(anchor) → chain 매핑으로 모킹."""
+    monkeypatch.setattr(run_trigger_b.krx, "previous_trading_session",
+                        lambda anchor: chain.get(anchor))
+
+
+def test_find_checkpoint_prev_session(monkeypatch):
+    _sessions(monkeypatch, {TODAY: "20260707"})
+    store = {"checkpoints/trigger_a_20260707.json": {"finalists": {"005930": {}}}}
     monkeypatch.setattr(run_trigger_b.storage, "load_json", lambda p: store.get(p))
     date_str, ckpt = run_trigger_b._find_checkpoint(TODAY)
     assert date_str == "20260707" and "005930" in ckpt["finalists"]
 
 
-def test_find_checkpoint_looks_back_when_today_missing(monkeypatch):
-    # 크론 지연으로 UTC 자정을 넘겨 실행 — 전일 체크포인트를 잡아야 한다
-    store = {"checkpoints/trigger_a_20260706.json": {"finalists": {}}}
-    monkeypatch.setattr(run_trigger_b.storage, "load_json", lambda p: store.get(p))
-    date_str, _ = run_trigger_b._find_checkpoint(TODAY)
-    assert date_str == "20260706"
-
-
-def test_find_checkpoint_skips_already_sent(monkeypatch):
+def test_find_checkpoint_walks_prior_session_when_sent(monkeypatch):
+    # 전영업일(화)은 이미 발송됨 → 그 이전 거래일(월)의 미발송분을 잡는다
+    _sessions(monkeypatch, {TODAY: "20260707", dt.date(2026, 7, 7): "20260706"})
     store = {
         "checkpoints/trigger_a_20260707.json": {"signal_sent": True},
         "checkpoints/trigger_a_20260706.json": {"finalists": {}},
@@ -79,9 +100,22 @@ def test_find_checkpoint_skips_already_sent(monkeypatch):
     assert date_str == "20260706"
 
 
-def test_find_checkpoint_none_within_lookback(monkeypatch):
+def test_find_checkpoint_none(monkeypatch):
+    _sessions(monkeypatch, {TODAY: "20260707", dt.date(2026, 7, 7): "20260706",
+                            dt.date(2026, 7, 6): "20260703"})
     monkeypatch.setattr(run_trigger_b.storage, "load_json", lambda p: None)
     assert run_trigger_b._find_checkpoint(TODAY) is None
+
+
+def test_find_checkpoint_calendar_fallback_on_krx_error(monkeypatch):
+    # KRX 조회 실패 → 달력 기준 폴백으로 전일 체크포인트를 잡는다
+    def _boom(anchor):
+        raise RuntimeError("KRX down")
+    monkeypatch.setattr(run_trigger_b.krx, "previous_trading_session", _boom)
+    store = {"checkpoints/trigger_a_20260707.json": {"finalists": {}}}
+    monkeypatch.setattr(run_trigger_b.storage, "load_json", lambda p: store.get(p))
+    date_str, _ = run_trigger_b._find_checkpoint(TODAY)
+    assert date_str == "20260707"
 
 
 # ───────────────────────────── 메시지 포맷 — 종목명·시장요인(β) 표기

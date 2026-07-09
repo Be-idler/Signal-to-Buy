@@ -87,6 +87,34 @@ def recent_trading_days(end_date: dt.date, count: int) -> list[str]:
     return list(reversed(days))
 
 
+def kst_today() -> dt.date:
+    """현재 KST 날짜. 러너가 UTC라도 한국 장 기준일을 정확히 잡는다.
+
+    트랙1 크론은 KST 08:05(=UTC 23:05 전일)에 발화하므로, UTC 날짜를 그대로 쓰면
+    기준일이 하루 어긋난다(월→금 대신 금→목 등). 반드시 KST로 환산해 앵커한다.
+    """
+    return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=9)).date()
+
+
+def prev_weekday(d: dt.date) -> dt.date:
+    """d 이전(당일 제외) 가장 최근 평일(월~금). 휴장 여부는 보지 않는다."""
+    d -= dt.timedelta(days=1)
+    while d.weekday() >= 5:                       # 토(5)·일(6)
+        d -= dt.timedelta(days=1)
+    return d
+
+
+def previous_trading_session(today: dt.date) -> str | None:
+    """`today` 기준 **전영업일**(당일 제외) — 시세가 있는 가장 최근 거래일(YYYYMMDD).
+
+    KRX OpenAPI는 시세를 익영업일 오전에 발행하므로, 트랙1은 항상 당일이 아닌
+    전영업일 데이터를 쓴다. 월요일이면 금요일, 직전 평일이 휴장이면 그 이전
+    시세 보유 거래일로 자동 소급된다(is_trading_day = 데이터 존재 여부).
+    """
+    days = recent_trading_days(today - dt.timedelta(days=1), 1)
+    return days[-1] if days else None
+
+
 def is_common_stock(ticker: str) -> bool:
     """보통주 판정 — 한국 종목코드 끝자리 0 = 보통주 (우선주·신주인수권 등 제외)."""
     return bool(ticker) and ticker[-1] == "0"

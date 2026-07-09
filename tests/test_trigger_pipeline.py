@@ -66,6 +66,33 @@ def test_resolve_basis_none_when_no_data(monkeypatch):
     assert basis is None and "시세 없음" in note
 
 
+def test_resolve_basis_krx_error_skips_after_grace(monkeypatch):
+    # 그레이스 초과까지 KRX 오류 지속 → 하루 스킵(크래시 아님)
+    def _boom(d):
+        raise RuntimeError("Read timed out")
+    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", _boom)
+    monkeypatch.setattr(run_trigger_a, "EOD_GRACE_MINUTES", 0)
+    basis, note = run_trigger_a._resolve_basis(TODAY, is_backfill=False)
+    assert basis is None and "KRX 조회 실패" in note
+
+
+def test_resolve_basis_retries_transient_krx_error(monkeypatch):
+    # 첫 폴은 타임아웃, 다음 폴은 성공 → 하루 스킵하지 않고 전영업일 확정
+    calls = {"n": 0}
+
+    def _flaky(d):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Read timed out")
+        return d == "20260707"
+    monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", _flaky)
+    monkeypatch.setattr(run_trigger_a.storage, "load_json", lambda p: None)
+    monkeypatch.setattr(run_trigger_a, "EOD_GRACE_MINUTES", 5)
+    monkeypatch.setattr(run_trigger_a.time, "sleep", lambda s: None)
+    basis, _ = run_trigger_a._resolve_basis(TODAY, is_backfill=False)
+    assert basis == "20260707" and calls["n"] == 2
+
+
 def test_resolve_basis_backfill_requires_that_day(monkeypatch):
     monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: d == "20260706")
     assert run_trigger_a._resolve_basis(dt.date(2026, 7, 6), is_backfill=True)[0] == "20260706"

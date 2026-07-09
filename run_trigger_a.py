@@ -160,25 +160,30 @@ def _resolve_basis(today: dt.date, is_backfill: bool) -> tuple[str | None, str]:
                (None, f"{date_str} 시세 없음(백필 대상 아님)")
 
     target = krx.prev_weekday(today)              # 달력상 직전 평일(월→금)
+    target_str = target.strftime("%Y%m%d")
     deadline = time.time() + EOD_GRACE_MINUTES * 60
     basis, note = None, ""
     while True:
+        reason = ""                               # 이번 폴에서 재시도가 필요한 사유
         try:
-            if krx.is_trading_day(target.strftime("%Y%m%d")):
-                basis = target.strftime("%Y%m%d")
-                note = f"전영업일 {basis}"
+            if krx.is_trading_day(target_str):
+                basis, note = target_str, f"전영업일 {target_str}"
                 break
+            reason = "시세 미발행"                  # 발행 지연 or 휴장
             if time.time() >= deadline:
                 # 그레이스 초과에도 시세 없음 → 그 평일은 휴장 → 직전 거래일로 소급
                 prior = krx.recent_trading_days(target - dt.timedelta(days=1), 1)
                 if not prior:
-                    return None, f"전영업일({target:%Y%m%d}) 및 그 이전 시세 없음"
+                    return None, f"전영업일({target_str}) 및 그 이전 시세 없음"
                 basis = prior[-1]
-                note = f"전영업일({target:%Y%m%d}) 휴장 → 직전 거래일 {basis}"
+                note = f"전영업일({target_str}) 휴장 → 직전 거래일 {basis}"
                 break
-        except Exception as e:                    # noqa: BLE001
-            return None, f"KRX 조회 실패: {e}"
-        print(f"[trigger_a] 전영업일 {target:%Y%m%d} 시세 미발행 — {EOD_POLL_SECONDS}s 후 "
+        except Exception as e:                    # noqa: BLE001 — KRX 일시 오류
+            # 타임아웃 등 일시 오류는 하루를 스킵하지 않고 그레이스 내에서 재시도한다.
+            if time.time() >= deadline:
+                return None, f"KRX 조회 실패(그레이스 초과): {e}"
+            reason = f"KRX 일시 오류({str(e)[:60]})"
+        print(f"[trigger_a] 전영업일 {target_str} {reason} — {EOD_POLL_SECONDS}s 후 "
               f"재확인(그레이스 {EOD_GRACE_MINUTES}분)")
         time.sleep(EOD_POLL_SECONDS)
 

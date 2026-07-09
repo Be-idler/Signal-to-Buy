@@ -2,10 +2,10 @@
 # 스케줄은 외부 크론(cron-job.org)이 repository_dispatch API로 정시에 쏜다
 # (GitHub schedule 크론은 수 시간씩 지연·누락돼 폐기 — 일정 정확 준수 목적):
 #   POST https://api.github.com/repos/Be-idler/Signal-to-Buy/dispatches
-#   · "Signal to Buy" 잡 (월–금 KST 17:30) → {"event_type":"signal-to-buy"} → trigger_a
-#   · "Signal notify" 잡 (화–토 KST 06:30) → {"event_type":"signal-notify"} → trigger_b
-# 당일 KRX 일별시세가 미발행이면 trigger_a가 짧게 그레이스 폴링 후 최신 가용
-# 거래일로 폴백해 분석한다(발행 지연을 '휴장일'로 오판하지 않음).
+#   · "Signal to Buy" 잡 (월–금 KST 08:05) → {"event_type":"signal-to-buy"} → trigger_a
+#   · "Signal notify" 잡 (월–금 KST 09:20) → {"event_type":"signal-notify"} → trigger_b
+# KRX OpenAPI는 시세를 익영업일 08:00경 발행하므로 두 트리거 모두 **전영업일**
+# (월요일→금요일, 직전 평일 휴장 시 그 이전 거래일) 데이터로 분석·발송한다.
 name: track1-daily
 
 on:

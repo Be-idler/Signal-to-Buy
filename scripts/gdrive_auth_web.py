@@ -105,8 +105,8 @@ def step_token(client_id: str, client_secret: str, raw_code: str) -> int:
         fh.write("GitHub 저장소 Settings → Secrets and variables → Actions에 등록:\n\n")
         fh.write(f"GDRIVE_ROOT_FOLDER_ID:\n{folder_id}\n\n")
         fh.write(f"GDRIVE_TOKEN_JSON_B64:\n{b64}\n")
-    print("✓ 성공 — 결과는 artifact(gdrive-secrets)의 gdrive_secrets.txt에 저장됨.")
-    print("  (시크릿 노출 방지를 위해 로그에는 출력하지 않습니다)")
+    print("✓ 성공 — 결과는 artifact(gdrive-secrets)에 암호화되어 저장됨.")
+    print("  (시크릿 노출 방지: 로그 미출력, artifact는 client_secret으로 복호화)")
     print(f"✓ SSOT 폴더 ID: {folder_id}")
     return 0
 

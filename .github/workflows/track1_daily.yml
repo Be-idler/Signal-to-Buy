@@ -36,10 +36,21 @@ on:
         required: false
         default: ""
 
+# 스테이지별 동시성 그룹 — 같은 스테이지의 새 실행이 뜨면 앞선(멈춰 있을 수 있는)
+# 실행을 취소한다. 멈춘 런이 러너를 오래 붙잡아 분과금·러너 고갈을 유발하던 문제
+# (러너 미할당으로 후속 잡이 즉시 실패) 재발 방지. A(signal-to-buy)와 B(signal-notify)
+# 는 다른 그룹이라 서로 취소하지 않는다. workflow_dispatch는 inputs.stage로, 외부
+# 크론(repository_dispatch)은 event action으로 그룹을 나눈다.
+concurrency:
+  group: track1-${{ github.event.inputs.stage || github.event.action }}
+  cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 120      # trigger_a 그레이스 폴링(~20분)·trigger_b 배치 대기(~60분) 여유
+    # 하드 상한 — 인프라 저하로 멈춘 런이 러너·분과금을 무한정 태우지 않도록 상한한다.
+    # trigger_a: 그레이스 폴링(≤30분)+수집, trigger_b: 배치 대기(≤15분)+처리.
+    timeout-minutes: 60
     env:
       DART_API_KEY: ${{ secrets.DART_API_KEY }}
       KRX_API_KEY: ${{ secrets.KRX_API_KEY }}

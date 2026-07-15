@@ -1,4 +1,4 @@
-"""트리거 B (UTC 21:30 = KST 06:30, 개장 전) — 트랙1 일일 파이프라인 후반부.
+"""트리거 B (외부 크론 KST 09:20 = UTC 00:20) — 트랙1 일일 파이프라인 후반부.
 
 ⑤ 배치 결과 수신(미완료 시 대기·재시도) → ⑥ LLM 정성 포함 최종 게이트
 (§13.4: A·D ≥ 3.0 + 플래그 검사 + 총점 임계) → 봇1 알림.
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import sys
 import time
 import traceback
@@ -19,8 +20,13 @@ import traceback
 import config
 from dhandho import frameworks, gate, krx, ledger, llm, notify, storage
 
-WAIT_MINUTES = 60          # 배치 미완료 시 최대 대기
-POLL_INTERVAL = 300
+# 배치 미완료 시 최대 대기. 트리거 A가 배치를 제출하고(08:05경) 트리거 B가 그
+# ~75분 뒤(09:20)에 소비하므로 정상일엔 배치가 이미 완료돼 즉시 반환된다. 이
+# 대기는 '살짝 늦은' 배치를 위한 여유일 뿐이므로 짧게 잡아 러너 점유 시간을
+# 상한한다(호스티드 러너 분과금·러너 고갈 방지). 끝내 미완료면 정성 미반영(2.5
+# 캡) 폴백 신호를 보낸다. 값은 환경변수로 튜닝 가능.
+WAIT_MINUTES = int(os.environ.get("BATCH_WAIT_MINUTES", "15"))
+POLL_INTERVAL = int(os.environ.get("BATCH_POLL_SECONDS", "180"))
 CKPT_LOOKBACK_SESSIONS = 3   # 전영업일부터 최대 N 거래일 소급(미실행 만회)
 CKPT_LOOKBACK_DAYS = 5       # KRX 장애 시 달력 기준 폴백 범위(연휴 대비)
 

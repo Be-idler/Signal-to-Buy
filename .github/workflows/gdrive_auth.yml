@@ -5,9 +5,16 @@
 #  1) Actions → gdrive-auth → Run workflow (step=url) → 로그의 URL을 브라우저에서 열어 동의
 #     → 'localhost 연결할 수 없음' 화면의 주소창 URL 전체 복사
 #  2) 10분 안에 Run workflow (step=token, auth_code=복사한 URL) 실행
-#  3) 실행 결과 페이지 하단 artifact 'gdrive-secrets' 다운로드 → txt 안의 두 값을
-#     Secrets(GDRIVE_ROOT_FOLDER_ID, GDRIVE_TOKEN_JSON_B64)에 등록
-#  4) 등록 후 해당 워크플로 런(artifact 포함)을 삭제할 것 — refresh token이 들어 있음
+#  3) 실행 결과 페이지 하단 artifact 'gdrive-secrets' 다운로드. 공개 repo에선
+#     artifact를 누구나 받을 수 있으므로 **client_secret을 패스프레이즈로 암호화**
+#     해서 올린다. 로컬에서 복호화:
+#       openssl enc -d -aes-256-cbc -pbkdf2 -in gdrive_secrets.txt.enc \
+#         -pass pass:'<GDRIVE_CLIENT_SECRET 값>'
+#     → 출력된 두 값을 Secrets(GDRIVE_ROOT_FOLDER_ID, GDRIVE_TOKEN_JSON_B64)에 등록
+#  4) 등록 후 해당 워크플로 런(artifact 포함)을 삭제할 것
+#
+# ⚠️ refresh token 7일 만료 방지: Google Cloud Console → OAuth 동의 화면이
+#    Testing이면 Production으로 게시할 것(drive.file은 비민감 스코프라 심사 불필요).
 name: gdrive-auth
 
 on:
@@ -39,10 +46,20 @@ jobs:
       - run: pip install requests
       - name: Run OAuth step
         run: python scripts/gdrive_auth_web.py ${{ github.event.inputs.step }}
+      # 공개 repo의 artifact는 누구나 다운로드 가능 → 평문 업로드 금지.
+      # client_secret(소유자만 아는 값)을 패스프레이즈로 AES 암호화해 올린다.
+      - name: Encrypt secrets file
+        if: github.event.inputs.step == 'token'
+        run: |
+          openssl enc -aes-256-cbc -pbkdf2 -salt \
+            -in gdrive_secrets.txt -out gdrive_secrets.txt.enc \
+            -pass env:GDRIVE_CLIENT_SECRET
+          rm gdrive_secrets.txt
+          echo "복호화(로컬): openssl enc -d -aes-256-cbc -pbkdf2 -in gdrive_secrets.txt.enc -pass pass:'<GDRIVE_CLIENT_SECRET 값>'"
       - name: Upload secrets artifact
         if: github.event.inputs.step == 'token'
         uses: actions/upload-artifact@v4
         with:
           name: gdrive-secrets
-          path: gdrive_secrets.txt
+          path: gdrive_secrets.txt.enc
           retention-days: 1

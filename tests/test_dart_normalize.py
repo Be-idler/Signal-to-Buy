@@ -59,3 +59,41 @@ def test_operating_income_missing_flagged():
 def test_dash_amount_ignored():
     fin = normalize_financials([_row("ifrs-full_Revenue", "매출액", "-", "IS")])
     assert "revenue" not in fin
+
+
+# ─────────────────────────── 정기보고서 본문 추출 (정성 그라운딩 원문)
+
+def test_extract_business_sections_picks_body_over_toc():
+    from dhandho import dart
+    # 목차(짧은 매치)와 본문(긴 매치)이 공존 — 본문을 골라야 한다
+    text = ("목차\n사업의 내용\n재무에 관한 사항\n감사인의 감사의견\n"
+            "II. 사업의 내용\n당사는 리튬일차전지를 주력으로 하며 군수·스마트그리드향 "
+            "매출 비중이 높다. 경쟁사는 소수이며 인증 장벽이 존재한다. " * 30
+            + "\nIII. 재무에 관한 사항\n(재무제표...)")
+    out = dart.extract_business_sections(text)
+    assert "[사업의 내용]" in out
+    assert "리튬일차전지" in out                      # 본문이 선택됨
+    assert "재무제표" not in out                      # 다음 섹션에서 절단
+
+
+def test_extract_business_sections_fallback_when_missing():
+    from dhandho import dart
+    text = "아무 구조 없는 문서 본문입니다. " * 50
+    out = dart.extract_business_sections(text)
+    assert out.startswith("아무 구조 없는")            # 앞부분 폴백
+
+
+def test_llm_doc_text_includes_periodic_body():
+    from dhandho import llm
+    docs = {"periodic": {"report_nm": "사업보고서 (2025.12)", "rcept_dt": "20260320",
+                         "rcept_no": "20260320000123",
+                         "text": "[사업의 내용]\n당사는 전지 제조업을 영위한다."},
+            "disclosures": [{"rcept_dt": "20260701", "report_nm": "단일판매ㆍ공급계약체결",
+                             "rcept_no": "20260701000001"}],
+            "disclosure_texts": [{"report_nm": "단일판매ㆍ공급계약체결",
+                                  "rcept_dt": "20260701", "rcept_no": "20260701000001",
+                                  "text": "계약금액 120억원, 매출액 대비 15%"}],
+            "executives": []}
+    out = llm._doc_text(docs)
+    assert "정기보고서 원문 발췌" in out and "전지 제조업" in out
+    assert "수시공시 본문" in out and "계약금액 120억원" in out

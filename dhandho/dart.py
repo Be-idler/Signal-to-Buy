@@ -10,7 +10,10 @@
 """
 from __future__ import annotations
 
+import datetime as dt
+import html
 import io
+import re
 import threading
 import time
 import zipfile
@@ -275,6 +278,98 @@ def get_recent_disclosures(corp_code: str, bgn_de: str, end_de: str) -> list[dic
                 "url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={row.get('rcept_no')}",
             })
     return out
+
+
+def get_latest_periodic(corp_code: str, end_de: str) -> dict | None:
+    """end_de 이전 최근 정기보고서(사업·반기·분기) 1건 — 정성 그라운딩 원문용.
+
+    반환: {rcept_no, report_nm, rcept_dt} | None. last_reprt_at=Y로 정정 반영
+    최종본만 조회한다.
+    """
+    bgn = (dt.datetime.strptime(end_de, "%Y%m%d")
+           - dt.timedelta(days=430)).strftime("%Y%m%d")     # 연 1회 사업보고서 커버
+    data = _get("list.json", corp_code=corp_code, bgn_de=bgn, end_de=end_de,
+                pblntf_ty="A", last_reprt_at="Y", page_count="20")
+    rows = [r for r in data.get("list", [])
+            if any(k in (r.get("report_nm") or "")
+                   for k in ("사업보고서", "반기보고서", "분기보고서"))]
+    if not rows:
+        return None
+    r = max(rows, key=lambda x: x.get("rcept_dt") or "")
+    return {"rcept_no": r.get("rcept_no"), "report_nm": r.get("report_nm"),
+            "rcept_dt": r.get("rcept_dt")}
+
+
+def get_document_text(rcept_no: str, max_chars: int = 400_000) -> str:
+    """공시 원문(document.xml zip) → 태그 제거한 평문. LLM 그라운딩 원료.
+
+    zip 내 가장 큰 파일이 본문(첨부 제외). 인코딩은 utf-8 → euc-kr 폴백.
+    """
+    r = requests.get(f"{BASE}/document.xml",
+                     params={"crtfc_key": config.DART_API_KEY,
+                             "rcept_no": rcept_no}, timeout=60)
+    r.raise_for_status()
+    try:
+        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+            name = max(zf.namelist(), key=lambda n: zf.getinfo(n).file_size)
+            raw = zf.read(name)
+    except zipfile.BadZipFile:
+        # zip이 아니면 오류 응답(키·한도·없는 접수번호) — 본문 미확보로 처리
+        raise RuntimeError(f"DART document.xml not a zip (rcept_no={rcept_no}): "
+                           f"{r.content[:120]!r}")
+    text = None
+    for enc in ("utf-8", "euc-kr"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"[ \t\xa0]+", " ", text)
+    text = re.sub(r"\s*\n\s*(\n\s*)+", "\n", text)
+    return text[:max_chars]
+
+
+# '사업의 내용' 구간의 끝 후보 — 목차의 짧은 매치를 배제하고 본문을 고르는 기준
+_SECTION_STOPS = ("재무에 관한 사항", "감사인의 감사의견", "이사회 등 회사의 기관")
+
+
+def extract_business_sections(text: str, biz_chars: int = 12_000,
+                              mdna_chars: int = 4_000) -> str:
+    """정기보고서 평문에서 '사업의 내용'·MD&A 구간만 추린다(LLM 토큰 절약).
+
+    같은 제목이 목차에도 나오므로, 각 매치 중 '다음 대구분 제목까지의 길이'가
+    가장 긴 것(=본문)을 고른다. 못 찾으면 문서 앞부분으로 폴백.
+    """
+    def _section(title: str, cap: int, stops: tuple[str, ...]) -> str | None:
+        best: tuple[int, int] | None = None
+        for m in re.finditer(re.escape(title), text):
+            start = m.end()
+            end = len(text)
+            for s in stops:
+                i = text.find(s, start)
+                if i != -1:
+                    end = min(end, i)
+            if best is None or (end - start) > (best[1] - best[0]):
+                best = (start, end)
+        if best is None:
+            return None
+        s, e = best
+        body = text[s:min(e, s + cap)].strip()
+        return body or None
+
+    parts = []
+    biz = _section("사업의 내용", biz_chars, _SECTION_STOPS)
+    if biz:
+        parts.append("[사업의 내용]\n" + biz)
+    mdna = _section("경영진단 및 분석의견", mdna_chars,
+                    ("감사인의 감사의견", "이사회 등 회사의 기관"))
+    if mdna:
+        parts.append("[이사의 경영진단 및 분석의견]\n" + mdna)
+    return "\n\n".join(parts) if parts else text[:biz_chars]
 
 
 def get_dividend_info(corp_code: str, year: int,

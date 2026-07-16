@@ -48,15 +48,31 @@ def _dhandho(m, close, shares, asym, evidence, closes):
     if upside is not None:
         ratio2 = (upside + 2 * bottom) / 3          # 비대칭 2:1 등가가격
         band_hi = min(band_hi, ratio2)
-        assumptions.append(f"비대칭 2:1 등가가 {_won(ratio2)}")
+        assumptions.append(f"비대칭 2:1 등가 가격 {_won(ratio2)}")
     entry = (f"{_won(band_lo)} ~ {_won(band_hi)} (바닥 +15~30% & 비대칭≥2:1)"
              if band_hi >= band_lo else
              f"{_won(band_hi)} 이하 (비대칭 2:1 제약이 우선)")
+    # 자산가치 바닥이 현재가를 크게 밑돌면(우량·고평가형) 단도 딥밸류 산법의
+    # 매수영역이 성립하지 않는다 — 오해 없도록 명시하고 목표가 표기도 중립화한다.
+    deep_value_fit = not (close and band_hi < close * 0.5)
+    if not deep_value_fit:
+        entry += (f" — 현재가({_won(close)})를 크게 밑돎: "
+                  "자산가치 기반 매수영역 아님(단도 딥밸류 부적합)")
+    upside_below = bool(close and upside is not None and upside <= close)
+    if evidence and upside and not upside_below:
+        six = f"{_won(upside)} 수렴 가능 (확정 촉매 존재)"
+    elif upside_below:
+        six = (f"{NO_TARGET} — 정상화이익 추정가({_won(upside)})가 현재가 이하 "
+               "(단도 수렴 시나리오 부적용)")
+    else:
+        six = f"{NO_TARGET} — 확정 촉매 없음"
+    three = (f"{_won(upside)} (정상화이익×보수 멀티플 수렴 시나리오)"
+             if not upside_below else
+             f"{NO_TARGET} — 추정가({_won(upside)})가 현재가 이하 (시나리오 부적용)")
     targets = {
-        "6개월": (f"{_won(upside)} 수렴 가능 (확정 촉매 존재)" if evidence and upside
-                 else f"{NO_TARGET} — 확정 촉매 없음"),
+        "6개월": six,
         "1년": NO_TARGET + " — 단도는 2~3년 수렴 전제",
-        "3년": f"{_won(upside)} (정상화이익×보수 멀티플 수렴 시나리오)",
+        "3년": three,
     }
     return {"entry": entry, "targets": targets, "assumptions": assumptions}
 

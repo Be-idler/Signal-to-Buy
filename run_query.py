@@ -38,7 +38,7 @@ _PENDING_QUAL = {
 
 def _handoff_lines(req: dict, basis: str, scores: dict, total, grade,
                    gates: dict | None, extras: list[str],
-                   flags: list[str]) -> list[str]:
+                   flags: list[str], pending: str | None = None) -> list[str]:
     """클로드 채팅 핸드오프 블록 — 기계 판독용 정량 요약(프롬프트가 소비).
 
     사람이 읽는 본문과 달리 하위점수 '코드'를 그대로 노출한다 — 프롬프트의
@@ -59,7 +59,8 @@ def _handoff_lines(req: dict, basis: str, scores: dict, total, grade,
         L.append("게이트: " + " · ".join(
             f"{k}={'통과' if ok else '미달'}" for k, ok in gates.items()))
     L += extras
-    L.append("재채점 대상(정성): " + _PENDING_QUAL[scheme])
+    L.append("재채점 대상(정성): "
+             + (pending if pending is not None else _PENDING_QUAL[scheme]))
     if flags:
         L.append("플래그(원시): " + ";".join(sorted(set(flags))))
     L.append(f"프롬프트: {_PROMPT_BASE}/{scheme}.md")
@@ -141,6 +142,7 @@ def analyze(req: dict) -> str:
         ctx["decline_note"] = decline["note"]
 
     scheme = req["scheme"]
+    checklist_override: list[str] | None = None
     if scheme == "dhandho":
         # 정성 입력 수집 (best-effort) — E1 배당·자사주, F2 내부자 소유보고,
         # LLM 그라운딩용 정기보고서 본문·수시공시 본문·임원 현황 (트리거 A와 동일 소스)
@@ -205,6 +207,26 @@ def analyze(req: dict) -> str:
             ctx["valuation_bullets"].append(
                 f"정성(LLM) {report_labels.SUBSCORE_KR.get(k, k)}: "
                 f"{float(item['score']):.1f}점 — {item.get('reason') or '근거 요약 없음'}")
+        # 자동 반영된 항목은 '사람이 직접 확인할 것'에서 제외 (중복 지시 방지)
+        tunneling = bool(((qual or {}).get("F3") or {}).get("tunneling_confirmed"))
+        checklist_override = []
+        if "D2" not in grounded_items:
+            checklist_override.append(_CHECKLIST_COMMON[0])
+        if insider is None:
+            checklist_override.append(_CHECKLIST_COMMON[1])
+        if tunneling:
+            checklist_override.append("⚠️ 공시에서 터널링 정황 감지(F3) — 관계자거래 원문 대조 필수")
+        elif "F3" not in grounded_items:
+            checklist_override.append(_CHECKLIST_COMMON[2])
+        checklist_override += _CHECKLIST_SCHEME["dhandho"]
+        # 재채점 대상: 그라운딩되지 않은 정성 항목만 (F2는 소유보고 확보 시 결정론 반영)
+        _order = [("B4", "B4 해자"), ("D2", "D2 급락원인"), ("D3", "D3 산업전망"),
+                  ("F1", "F1 자본배분"), ("F2", "F2 내부자"), ("F3", "F3 IR투명성")]
+        pending_items = [label for key, label in _order
+                         if (key == "F2" and insider is None)
+                         or (key != "F2" and key not in grounded_items)]
+        pending = (" · ".join(pending_items) if pending_items
+                   else "없음 — 전 항목 그라운딩·결정론 반영(재검증은 선택)")
         ctx["section_title"] = "단도 6개 렌즈 평가"
         ctx["section_scores"] = [
             (report_labels.SECTION_KR[k], secs[k]["total"],
@@ -222,7 +244,8 @@ def analyze(req: dict) -> str:
                          "정성 그라운딩(LLM): "
                          + ("·".join(grounded_items) + " 반영" if grounded_items
                             else "미반영" + (f" — {qual_fail}" if qual_fail else "")),
-                         "섹션가중: A=.25 B=.20 C=.20 D=.15 E=.10 F=.10"]}
+                         "섹션가중: A=.25 B=.20 C=.20 D=.15 E=.10 F=.10"],
+              "pending": pending}
     elif scheme == "lynch":
         r = frameworks_lynch.score_lynch(m)
         ctx["headline"] = (f"피터 린치 관점에서 '{r['category']}' 유형으로 분류되며, "
@@ -302,7 +325,8 @@ def analyze(req: dict) -> str:
     ctx["entry"] = tp["entry"]
     ctx["targets"] = tp["targets"]
     ctx["assumptions"] = tp["assumptions"]
-    ctx["checklist"] = _CHECKLIST_COMMON + _CHECKLIST_SCHEME.get(scheme, [])
+    ctx["checklist"] = (checklist_override if checklist_override is not None
+                        else _CHECKLIST_COMMON + _CHECKLIST_SCHEME.get(scheme, []))
     ctx["data_status"] = report_labels.translate_flags(flags)
     ctx["handoff"] = _handoff_lines(req, basis, flags=sorted(set(flags)), **ho)
     return report_format.build(req, ctx)
@@ -312,6 +336,14 @@ def _fin_as_of_kr(s: str) -> str:
     """'2026 1분기보고서(법정기한 …)' → 사람이 읽는 문장으로 다듬기."""
     return (s.replace("법정기한 ", "").replace(" 기준 추정)", " 이전 공시분)")
              .replace("손익 TTM 변환", "손익은 최근 12개월 환산"))
+
+
+def _josa(word: str, batchim: str = "이", no_batchim: str = "가") -> str:
+    """마지막 한글 음절의 받침 유무로 주격조사 선택 (괄호 등 비한글 꼬리 무시)."""
+    for ch in reversed(word):
+        if "가" <= ch <= "힣":
+            return batchim if (ord(ch) - 0xAC00) % 28 else no_batchim
+    return batchim
 
 
 def _dhandho_caveat(grounded_items: list[str], qual_fail: str | None) -> str:
@@ -344,7 +376,7 @@ def _dhandho_headline(decision: dict, secs: dict) -> str:
     if secs["C"]["total"] < 3.0:
         weak.append("저평가 매력")
     weak_txt = "·".join(weak) if weak else "일부 항목"
-    return (f"정량 기준 '{verdict_kr}' 대상입니다. {weak_txt}이(가) 단도 기준선에 못 미쳐, "
+    return (f"정량 기준 '{verdict_kr}' 대상입니다. {weak_txt}{_josa(weak_txt)} 단도 기준선에 못 미쳐, "
             f"현재 가격대에서는 매수 근거가 약합니다 (종합 {total:.1f}점 / 5점 만점).")
 
 

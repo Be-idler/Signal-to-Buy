@@ -323,3 +323,22 @@ def test_dhandho_caveat_reflects_grounding():
     assert "B4·D2" in s and "D3·F1·F3" in s          # 반영/보수처리 구분 표기
     s2 = run_query._dhandho_caveat([], "api timeout")
     assert "api timeout" in s2 and "보수적으로" in s2
+
+
+def test_josa_selects_by_batchim():
+    import run_query
+    assert run_query._josa("안전마진(하방보호)") == "가"   # '호' 받침 없음
+    assert run_query._josa("저평가 매력") == "이"           # '력' 받침 있음
+
+
+def test_dhandho_target_neutralized_when_deep_value_unfit():
+    # 자산 바닥·업사이드가 현재가를 크게 밑돌면 매수영역 아님을 명시하고
+    # 목표가를 '수렴 가능'으로 포장하지 않는다 (우량·고가 종목 오표기 방지)
+    from dhandho import target_price
+    asym = {"bottom_mktcap": 10_000.0, "upside_mktcap": 50_000.0,
+            "bottom_basis": "NCAV", "upside_basis": "영업이익×8x"}
+    r = target_price.compute("dhandho", {}, close=1000.0, shares=100.0,
+                             asym=asym, catalyst_evidence=["자사주 공시"])
+    assert "매수영역 아님" in r["entry"]
+    assert "현재가 이하" in r["targets"]["6개월"] and "수렴 가능" not in r["targets"]["6개월"]
+    assert "부적용" in r["targets"]["3년"]

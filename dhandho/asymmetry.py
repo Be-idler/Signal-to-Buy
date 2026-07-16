@@ -46,7 +46,9 @@ def compute(m: dict) -> dict:
         flags.append("upside_unavailable")
     else:
         upside = op * CONSERVATIVE_MULTIPLE
-        upside_basis = f"영업이익 {op:,.0f} × 보수 멀티플 {CONSERVATIVE_MULTIPLE:.0f}x"
+        op_kr = (f"{op / 1e12:,.1f}조원" if abs(op) >= 1e12
+                 else f"{op / 1e8:,.0f}억원")
+        upside_basis = f"영업이익 {op_kr} × 보수 멀티플 {CONSERVATIVE_MULTIPLE:.0f}x"
 
     ratio = None
     negative_risk = False

@@ -71,6 +71,13 @@ def _doc_text(docs: dict) -> str:
         parts.append(f"[수시공시 본문 — {dt_.get('report_nm')} {dt_.get('rcept_dt')} "
                      f"(tier 1, rcept_no={dt_.get('rcept_no')})]\n"
                      f"{(dt_.get('text') or '')[:1500]}")
+    if docs.get("news"):
+        parts.append("[뉴스 헤드라인 (tier 3 — 미디어, 보조 근거·주장 취급)]")
+        for n in docs["news"][:8]:
+            parts.append(f"- {n.get('date') or ''} {n.get('source') or ''}: "
+                         f"{n.get('title')}")
+    if docs.get("market_note"):
+        parts.append(f"[시장 요인 분해 (정량 참고)]\n{docs['market_note']}")
     if docs.get("executives"):
         parts.append("[임원 현황 — DART 사업보고서 (tier 1)]")
         for e in docs["executives"][:20]:

@@ -24,7 +24,7 @@ import traceback
 import pandas as pd
 
 import config
-from dhandho import (dart, frameworks, gate, krx, llm, market, metrics, notify,
+from dhandho import (dart, frameworks, gate, krx, llm, market, metrics, news, notify,
                      rsi, storage)
 
 # 트랙1은 항상 **전영업일** 데이터로 분석한다 — KRX OpenAPI가 시세를 익영업일
@@ -338,9 +338,17 @@ def main(argv: list[str] | None = None) -> int:
                         except RuntimeError as e:
                             print(f"[trigger_a] disclosure body failed {t} "
                                   f"{d0.get('rcept_no')}: {e}")
+                # 뉴스 헤드라인 (tier 3) — D2 급락 사유 보조 근거. best-effort.
+                news_items: list[dict] = []
+                try:
+                    nm = (eod.get(t) or {}).get("name") or t
+                    news_items = news.search_news(f"{nm} 주가")
+                except Exception as e:                # noqa: BLE001
+                    print(f"[trigger_a] 뉴스 검색 실패(무시) {t}: {e}")
                 docs[t] = {"disclosures": disclosures, "executives": execs,
                            "periodic": periodic,
-                           "disclosure_texts": disclosure_texts}
+                           "disclosure_texts": disclosure_texts,
+                           "news": news_items}
                 storage.save_json(docs[t], f"delta/{date_str}_{t}.json")
                 finalists[t]["disclosures"] = disclosures
                 finalists[t]["insider"] = insider[:30]

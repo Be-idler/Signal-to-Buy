@@ -81,6 +81,7 @@ def load_prices(basis: str) -> dict[str, dict]:
 
 def load_financials_asof(
     basis: str, require_ticker: str | None = None,
+    meta: dict | None = None,
 ) -> tuple[dict[str, dict], dict[str, list[dict]], str]:
     """기준일 시점 재무 SSOT (+TTM 변환) 로드.
 
@@ -107,6 +108,8 @@ def load_financials_asof(
         break
     if latest_df is None:
         raise RuntimeError(f"기준일 {basis} 이전에 공시된 재무 SSOT가 저장소에 없습니다")
+    if meta is not None:
+        meta["year"], meta["reprt"] = latest_year, latest_reprt
 
     fins = _df_to_fins(latest_df)
     as_of = (f"{latest_year} {REPRT_NAME[latest_reprt]}"
@@ -133,3 +136,28 @@ def load_financials_asof(
             if t in history:
                 history[t].append(fin)
     return fins, history, as_of
+
+
+def backfill_company(ticker: str, corp_code: str, year: int, reprt: str) -> bool:
+    """단일 기업 보고서를 DART에서 재입수해 SSOT parquet에 업서트.
+
+    TTM 변환에 필요한 전년 동기/연간 조각이 벌크 적재에서 누락됐을 때
+    질의·분석 경로가 스스로 메꾸는 용도(전량 재수집 불필요). 성공 시 True.
+    """
+    from dhandho import dart
+    from run_quarterly import FIN_COLUMNS, _row      # 지연 임포트 — 순환 방지
+
+    rows = dart.get_financials(corp_code, year, reprt)
+    fin = dart.normalize_financials(rows)
+    if not fin or all(fin.get(k) is None for k in ("revenue", "total_assets")):
+        return False                                  # 실질 데이터 없음 — 미공시 등
+    row = _row(ticker, corp_code, fin)
+    path = f"financials/{year}_{reprt}.parquet"
+    df = storage.read_parquet(path) if storage.exists(path) else None
+    new = pd.DataFrame([row], columns=FIN_COLUMNS)
+    if df is None:
+        df = new
+    else:
+        df = pd.concat([df[df["ticker"] != ticker], new], ignore_index=True)
+    storage.upload_parquet(df, path)
+    return True

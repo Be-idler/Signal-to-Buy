@@ -146,6 +146,25 @@ def retrieve_batch(batch_id: str) -> tuple[str, dict[str, dict]]:
     return "ended", qual_by_ticker
 
 
+def score_single(ticker: str, text: str, model: str | None = None) -> dict:
+    """단일 종목 동기 채점 (질의응답 경로) — 배치와 동일한 루브릭·파서.
+
+    질의응답은 종목 1개라 Batch 대기(수 분~수십 분)가 부적절해 동기 호출한다.
+    루브릭은 system 블록 캐싱으로 배치 경로와 비용 구조 동일.
+    """
+    client = _client()
+    model = model or config.LLM_SCORE_MODEL
+    resp = client.messages.create(
+        model=model,
+        max_tokens=config.LLM_SCORE_MAX_TOKENS,
+        system=[{"type": "text", "text": _SCORING_RUBRIC,
+                 "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": f"종목 {ticker} 자료:\n{text}"}],
+    )
+    out = "".join(b.text for b in resp.content if b.type == "text")
+    return _parse_qual(out)
+
+
 def _parse_qual(text: str) -> dict:
     """모델 출력에서 JSON 추출. 파싱 실패 시 빈 dict(→전 항목 2.5 캡)."""
     text = text.strip()

@@ -15,8 +15,10 @@ import datetime as dt
 
 import config
 from dhandho import (asymmetry, dart, frameworks, frameworks_ackman,
-                     frameworks_lynch, gate, krx, market, metrics, notify, pit,
-                     query_parser, report_format, report_labels, target_price)
+                     frameworks_lynch, gate, krx, llm, market, metrics, notify,
+                     pit, query_parser, report_format, report_labels,
+                     target_price)
+from run_trigger_a import _shareholder_summary
 
 # 클로드 채팅 심층분석 프롬프트(저장소 prompts/) — 핸드오프 블록에 링크로 병기
 _PROMPT_BASE = "https://github.com/Be-idler/Signal-to-Buy/blob/main/prompts"
@@ -140,19 +142,74 @@ def analyze(req: dict) -> str:
 
     scheme = req["scheme"]
     if scheme == "dhandho":
-        result = frameworks.score_dhandho(m, qual=None, peers=peers,
-                                          disclosures=disclosures)
+        # 정성 입력 수집 (best-effort) — E1 배당·자사주, F2 내부자 소유보고,
+        # LLM 그라운딩용 정기보고서 본문·수시공시 본문·임원 현황 (트리거 A와 동일 소스)
+        insider: list[dict] | None = None
+        shareholder = None
+        docs: dict = {"disclosures": disclosures}
+        if config.DART_API_KEY and corp:
+            year = int(basis[:4]) - 1
+            try:
+                insider = dart.get_insider_transactions(corp)
+                shareholder = _shareholder_summary(
+                    dart.get_dividend_info(corp, year),
+                    dart.get_treasury_stock(corp, year))
+            except RuntimeError as e:
+                print(f"[query] 배당·내부자 조회 실패(무시): {e}")
+            try:
+                docs["executives"] = dart.get_executive_profiles(corp, year)
+            except RuntimeError:
+                pass
+            try:
+                per = dart.get_latest_periodic(corp, basis)
+                if per:
+                    body = dart.get_document_text(per["rcept_no"])
+                    docs["periodic"] = {**per,
+                                        "text": dart.extract_business_sections(body)}
+            except RuntimeError as e:
+                print(f"[query] 정기보고서 본문 조회 실패(무시): {e}")
+            texts = []
+            for d0 in disclosures[:2]:
+                try:
+                    texts.append({"report_nm": d0.get("report_nm"),
+                                  "rcept_dt": d0.get("rcept_dt"),
+                                  "rcept_no": d0.get("rcept_no"),
+                                  "text": dart.get_document_text(d0["rcept_no"])[:1500]})
+                except RuntimeError:
+                    pass
+            docs["disclosure_texts"] = texts
+
+        qual, qual_fail = None, None
+        if config.ANTHROPIC_API_KEY and (docs.get("periodic") or docs.get("disclosure_texts")):
+            try:
+                extracted = llm.extract_passages({ticker: docs})
+                qual = llm.score_single(ticker, extracted[ticker])
+                if qual.get("_error"):
+                    qual_fail, qual = f"응답 파싱 실패({qual['_error']})", None
+            except Exception as e:                   # noqa: BLE001 — 정성 실패는 정량 리포트를 막지 않음
+                qual_fail = str(e)[:60]
+                print(f"[query] LLM 정성 채점 실패(무시): {e}")
+
+        result = frameworks.score_dhandho(m, qual=qual, peers=peers,
+                                          disclosures=disclosures,
+                                          shareholder=shareholder,
+                                          insider=insider)
         decision = gate.decide_signal(result)
         secs = result["sections"]
         ctx["headline"] = _dhandho_headline(decision, secs)
         ctx["valuation_bullets"] = _dhandho_valuation(m, asym)
+        grounded_items = [k for k in ("B4", "D2", "D3", "F1", "F3")
+                          if ((qual or {}).get(k) or {}).get("score") is not None]
+        for k in grounded_items:
+            item = qual[k]
+            ctx["valuation_bullets"].append(
+                f"정성(LLM) {report_labels.SUBSCORE_KR.get(k, k)}: "
+                f"{float(item['score']):.1f}점 — {item.get('reason') or '근거 요약 없음'}")
         ctx["section_title"] = "단도 6개 렌즈 평가"
         ctx["section_scores"] = [
             (report_labels.SECTION_KR[k], secs[k]["total"],
              report_labels.grade_word(secs[k]["total"])) for k in "ABCDEF"]
-        ctx["score_caveat"] = ("정성 항목(해자·급락 원인·산업 전망·자본배분·IR 투명성)은 "
-                               "이번 분석에서 미반영되어 보수적으로 처리됐습니다. "
-                               "최종 판단에는 사람의 확인이 필요합니다.")
+        ctx["score_caveat"] = _dhandho_caveat(grounded_items, qual_fail)
         qual_subs = " ".join(
             f"{c}={secs[sec]['subscores'][c]['score']:.2f}"
             for sec, c in (("B", "B4"), ("D", "D2"), ("D", "D3"),
@@ -162,6 +219,9 @@ def analyze(req: dict) -> str:
               "gates": {"A≥3.0": secs["A"]["total"] >= 3.0,
                         "D≥3.0": secs["D"]["total"] >= 3.0},
               "extras": [f"정성캡 하위점수(현재값): {qual_subs}",
+                         "정성 그라운딩(LLM): "
+                         + ("·".join(grounded_items) + " 반영" if grounded_items
+                            else "미반영" + (f" — {qual_fail}" if qual_fail else "")),
                          "섹션가중: A=.25 B=.20 C=.20 D=.15 E=.10 F=.10"]}
     elif scheme == "lynch":
         r = frameworks_lynch.score_lynch(m)
@@ -252,6 +312,22 @@ def _fin_as_of_kr(s: str) -> str:
     """'2026 1분기보고서(법정기한 …)' → 사람이 읽는 문장으로 다듬기."""
     return (s.replace("법정기한 ", "").replace(" 기준 추정)", " 이전 공시분)")
              .replace("손익 TTM 변환", "손익은 최근 12개월 환산"))
+
+
+def _dhandho_caveat(grounded_items: list[str], qual_fail: str | None) -> str:
+    """단도 점수 주석 — 정성 그라운딩 반영 범위를 정직하게 표기."""
+    if grounded_items:
+        rest = [k for k in ("B4", "D2", "D3", "F1", "F3") if k not in grounded_items]
+        s = ("정성 항목 " + "·".join(grounded_items)
+             + "는 DART 공시 원문 기반 LLM 채점이 반영됐습니다")
+        if rest:
+            s += f" ({'·'.join(rest)}는 근거 부족으로 보수 처리)"
+        return s + ". 최종 판단에는 사람의 확인이 필요합니다."
+    s = ("정성 항목(해자·급락 원인·산업 전망·자본배분·IR 투명성)은 "
+         "근거 미확보로 보수적으로 처리됐습니다")
+    if qual_fail:
+        s += f" (LLM 채점 실패: {qual_fail})"
+    return s + ". 최종 판단에는 사람의 확인이 필요합니다."
 
 
 def _dhandho_headline(decision: dict, secs: dict) -> str:

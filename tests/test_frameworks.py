@@ -270,3 +270,17 @@ def test_rank_universe_dispatch():
         assert False
     except ValueError:
         pass
+
+
+def test_e3_valueup_disclosure_is_top_catalyst_proxy():
+    # 기업가치 제고 계획(밸류업) 공시 = 주주환원 촉매의 직접 선언 → E3 최상위 프록시
+    r = score_dhandho(_metrics(), disclosures=[{"report_nm": "기업가치 제고 계획 안내"}])
+    e = r["sections"]["E"]
+    assert e["subscores"]["E3"]["score"] == 4.5
+    assert "E3_disclosure_proxy" in r["flags"]
+
+
+def test_e3_buyback_ranks_below_valueup():
+    r = score_dhandho(_metrics(),
+                      disclosures=[{"report_nm": "자기주식취득신탁계약체결결정"}])
+    assert r["sections"]["E"]["subscores"]["E3"]["score"] == 4.0

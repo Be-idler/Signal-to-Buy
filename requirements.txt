@@ -13,6 +13,9 @@ google-auth>=2.23
 google-auth-oauthlib>=1.1
 google-auth-httplib2>=0.2
 
+# 구글 트렌드 (비공식 — best-effort 보조 지표)
+pytrends>=4.9
+
 # 트랙3 워치리스트 설정 (watchlist.yaml)
 PyYAML>=6.0
 

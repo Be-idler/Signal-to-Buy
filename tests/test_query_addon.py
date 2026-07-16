@@ -415,3 +415,50 @@ def test_translate_flags_wording_reflects_backfill():
     assert any("재입수했지만" in s and "공시되지 않아" in s for s in after)
     assert any("재입수 후에도" in s for s in after)
     assert not any("은(는)" in s for s in after)      # 조사 자동 선택
+
+
+# ──────────────────────────── 관세청 수출 통계 · 구글 트렌드 (애드온)
+
+def test_trade_parse_items_and_total():
+    from dhandho import trade
+    xml = """<?xml version="1.0"?><response><header><resultCode>00</resultCode>
+    <resultMsg>정상서비스.</resultMsg></header><body><items>
+    <item><balPayments>100</balPayments><expDlr>1,200</expDlr><impDlr>500</impDlr>
+      <statKor>-</statKor><year>총계</year></item>
+    <item><balPayments>50</balPayments><expDlr>700</expDlr><impDlr>300</impDlr>
+      <statKor>미국</statKor><year>2026.05</year></item>
+    </items></body></response>"""
+    items = trade._parse_items(xml)
+    assert items[0]["year"] == "총계" and items[0]["expDlr"] == 1200.0
+    assert items[1]["statKor"] == "미국"
+
+
+def test_trade_parse_raises_on_error_code():
+    import pytest
+    from dhandho import trade
+    with pytest.raises(RuntimeError):
+        trade._parse_items("<response><header><resultCode>30</resultCode>"
+                           "<resultMsg>등록되지 않은 키</resultMsg></header></response>")
+
+
+def test_trade_export_yoy_note(monkeypatch):
+    from dhandho import trade
+    import config
+    monkeypatch.setattr(config, "CUSTOMS_COUNTRY_API_KEY", "k")
+    calls = []
+
+    def fake_window(hs, strt, end):
+        calls.append((strt, end))
+        return 800.0 if len(calls) == 1 else 1000.0    # 최근 800 vs 전년 1000
+    monkeypatch.setattr(trade, "_window_total_exp", fake_window)
+    r = trade.export_yoy("8542", "반도체")
+    assert r["yoy"] == -0.2 and "수출 감소" in r["note"]
+    assert "기업 실적과 1:1 아님" in r["note"]           # 근사치 규율 표기
+    (s1, e1), (s2, e2) = calls
+    assert int(s1) - int(s2) in (88, 100) or s1[:4] > s2[:4]  # 전년 동기 창
+
+
+def test_shift_month():
+    from dhandho import trade
+    assert trade._shift_month("202601", -2) == "202511"
+    assert trade._shift_month("202512", 1) == "202601"

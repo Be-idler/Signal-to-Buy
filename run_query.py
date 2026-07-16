@@ -17,7 +17,7 @@ import config
 from dhandho import (asymmetry, dart, frameworks, frameworks_ackman,
                      frameworks_lynch, gate, krx, llm, market, metrics, news,
                      notify, pit, query_parser, report_format, report_labels,
-                     target_price)
+                     target_price, trade, trends)
 from run_trigger_a import _shareholder_summary
 
 # 클로드 채팅 심층분석 프롬프트(저장소 prompts/) — 핸드오프 블록에 링크로 병기
@@ -216,6 +216,28 @@ def analyze(req: dict) -> str:
         # 뉴스가 없으면 시장 요인 분해(β·지수 동반락)라도 근거로 공급
         if not docs.get("news") and decline and decline.get("note"):
             docs["market_note"] = decline["note"]
+        # 검색량 추세 (구글 트렌드, best-effort) — 성장 추세 훼손 여부 보조 지표.
+        # 비공식 API라 차단이 잦다 — 실패는 조용히 생략(점수 직접 반영 없음).
+        trend = None
+        try:
+            trend = trends.search_trend(req["name"])
+        except Exception as e:                        # noqa: BLE001
+            print(f"[query] 트렌드 조회 실패(무시): {e}")
+        if trend:
+            docs["trend_note"] = trend["note"]
+        # 수출 추세 (관세청 품목 통계, best-effort) — HS 추정 후 전국 수출 YoY.
+        # 품목 단위 근사치라 점수 미반영 — LLM 근거·리포트 '참고' 표기 전용.
+        trade_info = None
+        if (config.CUSTOMS_COUNTRY_API_KEY and config.ANTHROPIC_API_KEY
+                and (docs.get("periodic") or {}).get("text")):
+            try:
+                hs = llm.extract_hs(docs["periodic"]["text"])
+                if hs:
+                    trade_info = trade.export_yoy(hs["hs"], hs.get("product"))
+            except Exception as e:                    # noqa: BLE001
+                print(f"[query] 수출 통계 조회 실패(무시): {e}")
+        if trade_info:
+            docs["trade_note"] = trade_info["note"]
 
         qual, qual_fail = None, None
         if config.ANTHROPIC_API_KEY and (docs.get("periodic") or docs.get("disclosure_texts")
@@ -269,6 +291,10 @@ def analyze(req: dict) -> str:
                          or (key != "F2" and key not in grounded_items)]
         pending = (" · ".join(pending_items) if pending_items
                    else "없음 — 전 항목 그라운딩·결정론 반영(재검증은 선택)")
+        if trend:
+            ctx["valuation_bullets"].append(f"검색 관심도(보조): {trend['note']}")
+        if trade_info:
+            ctx["valuation_bullets"].append(f"수출 추세(보조): {trade_info['note']}")
         ctx["section_title"] = "단도 6개 렌즈 평가"
         ctx["section_scores"] = [
             (report_labels.SECTION_KR[k], secs[k]["total"],

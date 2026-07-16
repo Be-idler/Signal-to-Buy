@@ -78,6 +78,10 @@ def _doc_text(docs: dict) -> str:
                          f"{n.get('title')}")
     if docs.get("market_note"):
         parts.append(f"[시장 요인 분해 (정량 참고)]\n{docs['market_note']}")
+    if docs.get("trend_note"):
+        parts.append(f"[검색량 추세 (tier 3 — 보조, 구글 트렌드)]\n{docs['trend_note']}")
+    if docs.get("trade_note"):
+        parts.append(f"[수출 통계 (tier 1 — 관세청, 품목 단위 참고)]\n{docs['trade_note']}")
     if docs.get("executives"):
         parts.append("[임원 현황 — DART 사업보고서 (tier 1)]")
         for e in docs["executives"][:20]:
@@ -170,6 +174,35 @@ def score_single(ticker: str, text: str, model: str | None = None) -> dict:
     )
     out = "".join(b.text for b in resp.content if b.type == "text")
     return _parse_qual(out)
+
+
+def extract_hs(business_text: str, model: str | None = None) -> dict | None:
+    """사업의 내용 발췌 → 주력 수출품 HS 4단위 추정 (Haiku, best-effort).
+
+    관세청 품목 통계 조회용 근사치 — 점수에 직접 반영하지 않는다.
+    """
+    client = _client()
+    model = model or config.LLM_EXTRACT_MODEL
+    resp = client.messages.create(
+        model=model, max_tokens=200,
+        messages=[{"role": "user", "content":
+                   "다음 한국 상장사 사업 내용에서 주력 '수출' 제품 하나의 HS코드 4단위를 "
+                   "추정하라. 내수 위주이거나 판단이 어려우면 null. "
+                   'JSON만 출력: {"hs":"8542","product":"반도체"} 또는 {"hs":null}\n\n'
+                   + business_text[:4000]}],
+    )
+    out = "".join(b.text for b in resp.content if b.type == "text")
+    start, end = out.find("{"), out.rfind("}")
+    if start == -1:
+        return None
+    try:
+        d = json.loads(out[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    hs = d.get("hs")
+    if not hs or not str(hs).strip().isdigit():
+        return None
+    return {"hs": str(hs).strip()[:4], "product": d.get("product")}
 
 
 def _parse_qual(text: str) -> dict:

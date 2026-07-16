@@ -19,6 +19,11 @@ TELEGRAM_BOT2_TOKEN = os.environ.get("TELEGRAM_BOT2_TOKEN", _TG_TOKEN)
 TELEGRAM_BOT2_CHAT_ID = os.environ.get("TELEGRAM_BOT2_CHAT_ID", _TG_CHAT)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# 관세청 수출입실적 (data.go.kr — 계정 인증키. 두 변수는 같은 값이어도 무방)
+CUSTOMS_COUNTRY_API_KEY = os.environ.get("CUSTOMS_COUNTRY_API_KEY", "")
+CUSTOMS_REGION_API_KEY = os.environ.get("CUSTOMS_REGION_API_KEY", "")
+# 시군구별 품목별 API 요청주소(전체 URL) — 확정 시 주입해 활성화
+CUSTOMS_REGION_ENDPOINT = os.environ.get("CUSTOMS_REGION_ENDPOINT", "")
 
 # 질의응답 봇 보안(애드온2 §2): 허가된 chat_id만 응답. 콤마 구분.
 TELEGRAM_ALLOWED_CHAT_IDS = [s.strip() for s in

@@ -288,11 +288,14 @@ def _score_E(m: dict, shareholder: dict | None = None,
     e2 = policy.get("beneficiary_score") if policy else None
     e3 = policy.get("catalyst_score") if policy else None
     if e3 is None and disclosures:
-        # 폴백: 확정 공시(자사주·공급계약) 존재 = 촉매 근접 근사
-        buyback = any(("자기주식" in d.get("report_nm", "")) or ("자사주" in d.get("report_nm", ""))
-                      for d in disclosures)
-        supply = any("공급계약" in d.get("report_nm", "") for d in disclosures)
-        e3 = 4.0 if buyback else 3.5 if supply else None
+        # 폴백: 확정 공시(밸류업·자사주·공급계약) 존재 = 촉매 근접 근사.
+        # 기업가치 제고 계획(밸류업)은 주주환원 촉매의 직접 선언이라 최상위.
+        names = [d.get("report_nm", "") for d in disclosures]
+        valueup = any(("기업가치 제고" in n) or ("기업가치제고" in n) or ("밸류업" in n)
+                      for n in names)
+        buyback = any(("자기주식" in n) or ("자사주" in n) for n in names)
+        supply = any("공급계약" in n for n in names)
+        e3 = 4.5 if valueup else 4.0 if buyback else 3.5 if supply else None
         if e3 is not None:
             s.flags.append("E3_disclosure_proxy")
     s.add("E1", e1, 0.40)

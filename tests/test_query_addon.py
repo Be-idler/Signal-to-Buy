@@ -287,3 +287,39 @@ def test_buffett_exposes_quant_precap():
     assert pre["BB"] is not None and pre["BB"] > 3.0    # 캡 이전 정량값 > 캡(3.0)
     assert r["subscores"]["BB"]["score"] == 3.0         # 표기값은 캡 적용
     assert pre["BC"] is not None
+
+
+# ──────────────────────────── 질의응답 LLM 정성 그라운딩 (애드온)
+
+def test_llm_score_single_parses_rubric_json(monkeypatch):
+    from dhandho import llm
+
+    class _Blk:
+        type = "text"
+        text = ('{"B4":{"score":4.0,"grounded":true,"reason":"브랜드 해자",'
+                '"basis":[{"tier":1,"source":"사업보고서","date":"20260320"}]},'
+                '"drop_reason":"일회성 비용","selection_reason":"저평가"}')
+
+    class _Resp:
+        content = [_Blk()]
+
+    class _Msgs:
+        def create(self, **kw):
+            assert "종목 005930" in kw["messages"][0]["content"]
+            return _Resp()
+
+    class _Client:
+        messages = _Msgs()
+
+    monkeypatch.setattr(llm, "_client", lambda: _Client())
+    qual = llm.score_single("005930", "추출 자료")
+    assert qual["B4"]["score"] == 4.0 and qual["B4"]["basis"]
+    assert qual["drop_reason"] == "일회성 비용"
+
+
+def test_dhandho_caveat_reflects_grounding():
+    import run_query
+    s = run_query._dhandho_caveat(["B4", "D2"], None)
+    assert "B4·D2" in s and "D3·F1·F3" in s          # 반영/보수처리 구분 표기
+    s2 = run_query._dhandho_caveat([], "api timeout")
+    assert "api timeout" in s2 and "보수적으로" in s2

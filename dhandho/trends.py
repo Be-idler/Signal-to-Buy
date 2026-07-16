@@ -15,7 +15,9 @@ def search_trend(keyword: str, timeout: int = 20) -> dict | None:
     """
     from pytrends.request import TrendReq
 
-    tr = TrendReq(hl="ko", tz=540, timeout=(10, timeout), retries=1)
+    # retries 인자 금지 — pytrends가 urllib3 1.x 전용 method_whitelist를 넘겨
+    # urllib3 2.x에서 TypeError가 난다 (재시도는 호출부 best-effort로 충분)
+    tr = TrendReq(hl="ko", tz=540, timeout=(10, timeout))
     tr.build_payload([keyword], timeframe="today 12-m", geo="KR")
     df = tr.interest_over_time()
     if df is None or df.empty or keyword not in df:

@@ -112,7 +112,8 @@ def build(req: dict, ctx: dict) -> str:
     # 채팅에 붙여넣으면 정성 항목을 재채점해 최종 분석을 만들 수 있게 하는
     # 기계 판독용 요약(하위점수 코드·게이트·재채점 대상·원시 플래그).
     if ctx.get("handoff"):
-        L.append("\n■ 클로드 심층분석 핸드오프 (프롬프트와 함께 채팅에 붙여넣기)")
+        L.append("\n■ 클로드 심층 재검증 (선택) — 자동 분석을 넘어 더 깊게 볼 때, "
+                 "아래 블록 전체를 프롬프트 링크와 함께 클로드 채팅에 붙여넣으세요")
         L += [f" {h}" for h in ctx["handoff"]]
 
     L.append("\n" + DISCLAIMER)

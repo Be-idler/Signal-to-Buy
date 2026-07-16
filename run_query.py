@@ -248,7 +248,12 @@ def analyze(req: dict) -> str:
         tunneling = bool(((qual or {}).get("F3") or {}).get("tunneling_confirmed"))
         checklist_override = []
         if "D2" not in grounded_items:
-            checklist_override.append(_CHECKLIST_COMMON[0])
+            if docs.get("news") or docs.get("disclosure_texts"):
+                checklist_override.append(
+                    "최근 주가 부진의 원인 — 공시·뉴스 자동 검토에서 확정 근거를 찾지 "
+                    "못했습니다 (업계 동향·기사 원문 직접 확인 필요)")
+            else:
+                checklist_override.append(_CHECKLIST_COMMON[0])
         if insider is None:
             checklist_override.append(_CHECKLIST_COMMON[1])
         if tunneling:
@@ -277,7 +282,7 @@ def analyze(req: dict) -> str:
               "total": decision["total"], "grade": decision["verdict"],
               "gates": {"A≥3.0": secs["A"]["total"] >= 3.0,
                         "D≥3.0": secs["D"]["total"] >= 3.0},
-              "extras": [f"정성캡 하위점수(현재값): {qual_subs}",
+              "extras": [f"정성 하위점수(2.5=근거부족 보수값): {qual_subs}",
                          "정성 그라운딩(LLM): "
                          + ("·".join(grounded_items) + " 반영" if grounded_items
                             else "미반영" + (f" — {qual_fail}" if qual_fail else "")),
@@ -364,10 +369,11 @@ def analyze(req: dict) -> str:
     ctx["assumptions"] = tp["assumptions"]
     ctx["checklist"] = (checklist_override if checklist_override is not None
                         else _CHECKLIST_COMMON + _CHECKLIST_SCHEME.get(scheme, []))
-    ctx["data_status"] = report_labels.translate_flags(flags)
+    ctx["data_status"] = report_labels.translate_flags(
+        flags, ttm_backfilled=(scheme == "dhandho" and ttm_backfilled))
     if scheme == "dhandho" and ttm_backfilled:
         ctx["data_status"].append(
-            "누락됐던 전년 동기 재무를 DART에서 자동 재입수해 TTM 손익을 보정·재채점했습니다.")
+            "전년 동기 재무를 DART에서 자동 재입수해 TTM 손익을 보정·재채점했습니다.")
     ctx["handoff"] = _handoff_lines(req, basis, flags=sorted(set(flags)), **ho)
     return report_format.build(req, ctx)
 

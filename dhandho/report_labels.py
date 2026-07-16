@@ -113,7 +113,15 @@ def grade_word(score) -> str:
     return "미흡"
 
 
-def translate_flags(flags) -> list[str]:
+def _josa(word: str, batchim: str, no_batchim: str) -> str:
+    """마지막 한글 음절의 받침 유무로 조사 선택 (괄호 등 비한글 꼬리 무시)."""
+    for ch in reversed(word):
+        if "가" <= ch <= "힣":
+            return batchim if (ord(ch) - 0xAC00) % 28 else no_batchim
+    return batchim
+
+
+def translate_flags(flags, ttm_backfilled: bool = False) -> list[str]:
     """플래그 목록 → 사람이 읽는 한국어 설명 목록(중복 제거·그룹화)."""
     seen = list(dict.fromkeys(flags or []))
     out: list[str] = []
@@ -132,12 +140,19 @@ def translate_flags(flags) -> list[str]:
 
     if flow:
         names = ", ".join(FLOW_FIELD_KR.get(x, x) for x in flow)
-        out.insert(0, f"손익 지표({names})가 비어 있습니다 — 최근 12개월(TTM) 계산에 필요한 "
-                      f"전년 동기 재무가 아직 적재되지 않았기 때문입니다. 분기 재무 적재 후 "
-                      f"자동으로 채워집니다.")
+        if ttm_backfilled:
+            out.insert(0, f"{names}: DART에서 전년 동기 보고서를 자동 재입수했지만 "
+                          f"분기 원문에 해당 계정이 공시되지 않아 산출에서 제외했습니다 "
+                          f"(관련 항목은 보수적으로 처리).")
+        else:
+            out.insert(0, f"{names}: 최근 12개월(TTM) 계산에 필요한 전년 동기 재무가 "
+                          f"아직 적재되지 않아 비어 있습니다. 분기 재무 적재 후 "
+                          f"자동으로 채워집니다.")
     if ttm:
         names = ", ".join(FLOW_FIELD_KR.get(x, x) for x in ttm)
-        out.append(f"{names}은(는) 전년 동기 대신 직전 연간값으로 근사했습니다.")
+        tail = " (재입수 후에도 분기 원문 미공시)" if ttm_backfilled else ""
+        out.append(f"{names}{_josa(names, '은', '는')} 전년 동기 대신 "
+                   f"직전 연간값으로 근사했습니다{tail}.")
     if insuff:
         names = ", ".join(SUBSCORE_KR.get(x, x) for x in insuff)
         out.append(f"다음 항목은 근거가 부족해 보수적으로 처리됐습니다 — {names}.")

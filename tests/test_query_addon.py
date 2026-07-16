@@ -250,10 +250,10 @@ def test_report_renders_handoff_block():
            "handoff": ["스킴=buffett(버핏멍거) · 종목=삼성전자(005930) · 기준일=20260708",
                        "정량점수: BA=3.50"]}
     text = report_format.build(req, ctx)
-    assert "■ 클로드 심층분석 핸드오프" in text
+    assert "■ 클로드 심층 재검증 (선택)" in text
     assert "스킴=buffett" in text
     # 핸드오프는 고지문(disclaimer)보다 앞에 위치
-    assert text.index("핸드오프") < text.index(report_format.DISCLAIMER)
+    assert text.index("심층 재검증") < text.index(report_format.DISCLAIMER)
 
 
 def test_handoff_lines_contents():
@@ -404,3 +404,14 @@ def test_backfill_company_rejects_empty(monkeypatch):
     monkeypatch.setattr(dart, "get_financials", lambda c, y, r: [])
     monkeypatch.setattr(dart, "normalize_financials", lambda rows: {})
     assert pit.backfill_company("005930", "00126380", 2025, "11013") is False
+
+
+def test_translate_flags_wording_reflects_backfill():
+    from dhandho import report_labels as rl
+    flags = ["depreciation_flow_basis_mismatch", "capex_ttm_fallback_annual"]
+    before = rl.translate_flags(flags)
+    after = rl.translate_flags(flags, ttm_backfilled=True)
+    assert any("아직 적재되지 않아" in s for s in before)
+    assert any("재입수했지만" in s and "공시되지 않아" in s for s in after)
+    assert any("재입수 후에도" in s for s in after)
+    assert not any("은(는)" in s for s in after)      # 조사 자동 선택

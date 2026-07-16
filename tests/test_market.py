@@ -78,6 +78,33 @@ def test_beta_none_uses_unit_assumption():
     assert "β≈1 가정" in r["note"]
 
 
+def test_build_series_immune_to_share_count_changes():
+    # A가 증자로 시총 2배(가격 불변) → 시총합 방식은 지수 급등으로 오인,
+    # 가격수익률 체인링크는 지수 불변이어야 한다
+    snaps = {
+        "20260601": _rows([("A", 1000.0, 100.0), ("B", 500.0, 50.0)]),
+        "20260602": _rows([("A", 2000.0, 100.0), ("B", 500.0, 50.0)]),  # A 증자
+        "20260603": _rows([("A", 2000.0, 100.0), ("B", 500.0, 50.0)]),
+    }
+    _, levels = market.build_series(snaps)
+    assert levels[0] == 100.0
+    assert abs(levels[1] - 100.0) < 1e-9        # 가격 불변 → 지수 불변
+    assert abs(levels[2] - 100.0) < 1e-9
+
+
+def test_build_series_ipo_delisting_do_not_distort():
+    # 신규상장 C(대형)와 B 상폐가 껴도 공통 종목 수익률만 반영
+    snaps = {
+        "20260601": _rows([("A", 1000.0, 100.0), ("B", 500.0, 50.0)]),
+        "20260602": _rows([("A", 900.0, 90.0), ("C", 9000.0, 10.0)]),   # B 상폐·C 신규
+        "20260603": _rows([("A", 810.0, 81.0), ("C", 9000.0, 10.0)]),
+    }
+    _, levels = market.build_series(snaps)
+    assert abs(levels[1] - 90.0) < 1e-9         # 공통(A)만: -10%
+    # 공통(A·C) 시총가중: (900×-10% + 9000×0%) / 9900 ≈ -0.91%
+    assert abs(levels[2] - 90.0 * (1 - 90.0 / 9900.0)) < 1e-9
+
+
 def test_end_to_end_series_from_snapshots():
     # 3거래일 스냅샷: 시장·종목 모두 하락, 종목이 시장과 동조
     snaps = {

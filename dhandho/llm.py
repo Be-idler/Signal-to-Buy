@@ -51,12 +51,26 @@ def _client():
 
 
 def _doc_text(docs: dict) -> str:
-    """finalist 1종목의 수집 자료를 프롬프트 텍스트로 직렬화."""
+    """finalist 1종목의 수집 자료를 프롬프트 텍스트로 직렬화.
+
+    B4(해자)·D3(산업)·F1(자본배분)의 근거는 정기보고서 **본문**에서 나온다 —
+    제목 목록만으로는 전 항목 '근거 부재'가 되므로 periodic(사업의 내용·MD&A
+    발췌)과 수시공시 본문(disclosure_texts)을 반드시 포함한다.
+    """
     parts = []
+    if docs.get("periodic"):
+        p = docs["periodic"]
+        parts.append(f"[정기보고서 원문 발췌 — {p.get('report_nm')} "
+                     f"{p.get('rcept_dt')} (tier 1, rcept_no={p.get('rcept_no')})]")
+        parts.append((p.get("text") or "")[:16000])
     if docs.get("disclosures"):
         parts.append("[DART 공시 목록 (tier 1)]")
         for d in docs["disclosures"][:30]:
             parts.append(f"- {d.get('rcept_dt')} {d.get('report_nm')} (rcept_no={d.get('rcept_no')})")
+    for dt_ in docs.get("disclosure_texts", [])[:3]:
+        parts.append(f"[수시공시 본문 — {dt_.get('report_nm')} {dt_.get('rcept_dt')} "
+                     f"(tier 1, rcept_no={dt_.get('rcept_no')})]\n"
+                     f"{(dt_.get('text') or '')[:1500]}")
     if docs.get("executives"):
         parts.append("[임원 현황 — DART 사업보고서 (tier 1)]")
         for e in docs["executives"][:20]:

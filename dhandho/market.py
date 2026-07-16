@@ -31,16 +31,37 @@ def market_level(rows, universe=None) -> float | None:
 
 
 def build_series(snapshots: dict) -> tuple[list[str], list[float | None]]:
-    """{date: [rows]} → (dates_asc, levels). 마지막 날 종목집합을 고정 유니버스로.
+    """{date: [rows]} → (dates_asc, 체인링크 시장지수 레벨, 시작=100).
 
-    (유니버스를 고정해 특정일 결측 종목이 지수 프록시를 흔드는 것을 완화)
+    인접 거래일 **공통 종목**의 시총가중 가격수익률을 체인링크한다. 시총 합
+    방식은 IPO·상폐·증자·감자 등 주식수 변동이 지수를 흔들어 낙폭·β를
+    왜곡하므로 쓰지 않는다(가격수익률 가중은 주식수 변동에 면역).
     """
     dates = sorted(snapshots)
     if len(dates) < 2:
         return dates, []
-    universe = {r.get("ticker") for r in snapshots[dates[-1]]
-                if r.get("mktcap") is not None}
-    return dates, [market_level(snapshots[d], universe) for d in dates]
+    levels: list[float | None] = [100.0]
+    level = 100.0
+    prev = {r["ticker"]: r for r in snapshots[dates[0]] if r.get("ticker")}
+    for d in dates[1:]:
+        cur = {r["ticker"]: r for r in snapshots[d] if r.get("ticker")}
+        num = den = 0.0
+        for t, pr in prev.items():
+            cr = cur.get(t)
+            if cr is None:
+                continue
+            pc, cc, pm = pr.get("close"), cr.get("close"), pr.get("mktcap")
+            if not pc or cc is None or not pm:
+                continue
+            num += pm * (cc / pc - 1.0)
+            den += pm
+        if den > 0:
+            level *= 1.0 + num / den
+            levels.append(level)
+        else:
+            levels.append(None)      # 공통 종목 없음(데이터 이상) — 해당일만 결측
+        prev = cur
+    return dates, levels
 
 
 def drawdown(series) -> float | None:

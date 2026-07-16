@@ -180,3 +180,25 @@ def test_digest_row_includes_name_and_market_factor():
     assert "국영지앤엠 (006050)" in row
     assert "하락사유: 업황 부진" in row
     assert "시장요인:" in row and "β 0.90" in row
+
+
+def test_digest_row_merges_market_factor_when_reason_unclear():
+    # 하락사유가 '판단 불가'류면 시장요인을 별도 줄이 아닌 하락사유 줄에 병합
+    entry = {"rsi": 25.5, "name": "액트로",
+             "market_context": {"beta": 0.9, "stock_dd": -0.15, "market_dd": -0.09}}
+    decision = {"total": 3.03, "verdict": "WATCH"}
+    row = run_trigger_b._format_digest_row(
+        "290740", entry, decision, {"drop_reason": "핵심 자료 부재로 판단 불가"}, {}, {})
+    drop_line = next(l for l in row.split("\n") if "하락사유" in l)
+    assert "시장요인 참고" in drop_line                  # 같은 줄에 병합
+    assert "\n  시장요인:" not in row                    # 별도 줄 없음
+
+
+def test_digest_row_merges_when_reason_missing():
+    entry = {"rsi": 29.0,
+             "market_context": {"beta": 1.1, "stock_dd": -0.20, "market_dd": -0.10}}
+    decision = {"total": 2.7, "verdict": "PASS"}
+    row = run_trigger_b._format_digest_row(
+        "000000", entry, decision, {}, {"drawdown_52w": -0.35}, {})
+    drop_line = next(l for l in row.split("\n") if "하락사유" in l)
+    assert "52주 고점 대비" in drop_line and "시장요인 참고" in drop_line

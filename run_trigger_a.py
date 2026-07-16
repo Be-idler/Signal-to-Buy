@@ -305,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
                 corp = corp_by.get(t)
                 disclosures, execs, insider = [], [], []
                 shareholder = None
+                periodic = None
+                disclosure_texts: list[dict] = []
                 if corp:
                     try:
                         disclosures = dart.get_recent_disclosures(corp, bgn, date_str)
@@ -315,7 +317,30 @@ def main(argv: list[str] | None = None) -> int:
                         shareholder = _shareholder_summary(dividend, treasury)
                     except RuntimeError as e:
                         print(f"[trigger_a] delta fetch failed {t}: {e}")
-                docs[t] = {"disclosures": disclosures, "executives": execs}
+                    # 정기보고서 본문(사업의 내용·MD&A) — B4·D3·F1 그라운딩의 핵심 원문.
+                    # 제목 목록만 주면 LLM이 전 항목 '근거 부재'가 된다. best-effort.
+                    try:
+                        per = dart.get_latest_periodic(corp, date_str)
+                        if per:
+                            body = dart.get_document_text(per["rcept_no"])
+                            periodic = {**per,
+                                        "text": dart.extract_business_sections(body)}
+                    except RuntimeError as e:
+                        print(f"[trigger_a] periodic fetch failed {t}: {e}")
+                    # 최근 수시공시 상위 2건 본문 — D2(급락 원인) 근거 보강. best-effort.
+                    for d0 in disclosures[:2]:
+                        try:
+                            disclosure_texts.append({
+                                "report_nm": d0.get("report_nm"),
+                                "rcept_dt": d0.get("rcept_dt"),
+                                "rcept_no": d0.get("rcept_no"),
+                                "text": dart.get_document_text(d0["rcept_no"])[:1500]})
+                        except RuntimeError as e:
+                            print(f"[trigger_a] disclosure body failed {t} "
+                                  f"{d0.get('rcept_no')}: {e}")
+                docs[t] = {"disclosures": disclosures, "executives": execs,
+                           "periodic": periodic,
+                           "disclosure_texts": disclosure_texts}
                 storage.save_json(docs[t], f"delta/{date_str}_{t}.json")
                 finalists[t]["disclosures"] = disclosures
                 finalists[t]["insider"] = insider[:30]

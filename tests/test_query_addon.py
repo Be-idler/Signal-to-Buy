@@ -462,3 +462,46 @@ def test_shift_month():
     from dhandho import trade
     assert trade._shift_month("202601", -2) == "202511"
     assert trade._shift_month("202512", 1) == "202601"
+
+
+def test_region_parse_and_window(monkeypatch):
+    from dhandho import trade
+    import config
+    xml = """<?xml version="1.0"?><response><header><resultCode>00</resultCode>
+    <resultMsg>정상서비스.</resultMsg></header><body><items>
+    <item><expUsdAmt> 9,716</expUsdAmt><impUsdAmt> 58</impUsdAmt>
+      <korePrlstNm>메모리</korePrlstNm><priodTitle>2026.01</priodTitle>
+      <sggNm>경기도 이천시</sggNm></item>
+    <item><expUsdAmt> 155</expUsdAmt><impUsdAmt> 1</impUsdAmt>
+      <korePrlstNm>메모리</korePrlstNm><priodTitle>2026.01</priodTitle>
+      <sggNm>경기도 고양시</sggNm></item>
+    </items></body></response>"""
+    items = trade._parse_region_items(xml)
+    assert items[0]["sggNm"] == "경기도 이천시" and items[0]["expUsdAmt"] == 9716.0
+
+    class _R:
+        text = xml
+        def raise_for_status(self): pass
+    monkeypatch.setattr(config, "CUSTOMS_REGION_API_KEY", "k")
+    monkeypatch.setattr(trade.requests, "get", lambda *a, **kw: _R())
+    total, name = trade._region_window_exp("854232", "41", "이천", "202603", "202605")
+    assert total == 9716.0 and name == "메모리"          # 시군구 필터 적용
+
+
+def test_region_export_yoy(monkeypatch):
+    from dhandho import trade
+    import config
+    monkeypatch.setattr(config, "CUSTOMS_REGION_API_KEY", "k")
+    seq = [(900.0, "메모리"), (1000.0, "메모리")]        # 최근 900 vs 전년 1000
+    monkeypatch.setattr(trade, "_region_window_exp",
+                        lambda *a, **kw: seq.pop(0))
+    r = trade.region_export_yoy("854232", "경기", "이천시")
+    assert r["yoy"] == -0.1
+    assert "이천시 HS 854232(메모리)" in r["note"]
+    assert "신고지 기준" in r["note"]                    # 혼재 가능성 규율 표기
+
+
+def test_region_export_yoy_requires_known_sido():
+    from dhandho import trade
+    assert trade.SIDO_CD["경기"] == "41" and trade.SIDO_CD["서울"] == "11"
+    assert trade.region_export_yoy("854232", "미상", "이천시") is None

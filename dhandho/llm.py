@@ -82,6 +82,9 @@ def _doc_text(docs: dict) -> str:
         parts.append(f"[검색량 추세 (tier 3 — 보조, 구글 트렌드)]\n{docs['trend_note']}")
     if docs.get("trade_note"):
         parts.append(f"[수출 통계 (tier 1 — 관세청, 품목 단위 참고)]\n{docs['trade_note']}")
+    if docs.get("trade_region_note"):
+        parts.append(f"[수출 통계·시군구 프록시 (tier 1 — 관세청, 신고지 기준 참고)]\n"
+                     f"{docs['trade_region_note']}")
     if docs.get("executives"):
         parts.append("[임원 현황 — DART 사업보고서 (tier 1)]")
         for e in docs["executives"][:20]:
@@ -177,18 +180,22 @@ def score_single(ticker: str, text: str, model: str | None = None) -> dict:
 
 
 def extract_hs(business_text: str, model: str | None = None) -> dict | None:
-    """사업의 내용 발췌 → 주력 수출품 HS 4단위 추정 (Haiku, best-effort).
+    """사업의 내용 발췌 → 주력 수출품 HS 6단위 + 주요 생산공장 소재지 추정 (Haiku).
 
-    관세청 품목 통계 조회용 근사치 — 점수에 직접 반영하지 않는다.
+    관세청 품목/시군구 통계 조회용 근사치 — 점수에 직접 반영하지 않는다.
+    반환: {"hs"(4단위), "hs6", "product", "sido", "sgg"} | None.
     """
     client = _client()
     model = model or config.LLM_EXTRACT_MODEL
     resp = client.messages.create(
-        model=model, max_tokens=200,
+        model=model, max_tokens=250,
         messages=[{"role": "user", "content":
-                   "다음 한국 상장사 사업 내용에서 주력 '수출' 제품 하나의 HS코드 4단위를 "
-                   "추정하라. 내수 위주이거나 판단이 어려우면 null. "
-                   'JSON만 출력: {"hs":"8542","product":"반도체"} 또는 {"hs":null}\n\n'
+                   "다음 한국 상장사 사업 내용에서 ①주력 '수출' 제품 하나의 HS코드 6단위 "
+                   "②주요 생산공장 소재지(시도 2글자 축약: 서울/부산/대구/인천/광주/대전/울산/"
+                   "세종/경기/강원/충북/충남/전북/전남/경북/경남/제주, 그리고 시군구명 예: 이천시)를 "
+                   "추정하라. 내수 위주이거나 판단이 어려우면 hs는 null, 소재지 불명이면 sido/sgg는 null. "
+                   'JSON만 출력: {"hs6":"854232","product":"메모리 반도체","sido":"경기","sgg":"이천시"} '
+                   '또는 {"hs6":null}\n\n'
                    + business_text[:4000]}],
     )
     out = "".join(b.text for b in resp.content if b.type == "text")
@@ -199,10 +206,12 @@ def extract_hs(business_text: str, model: str | None = None) -> dict | None:
         d = json.loads(out[start:end + 1])
     except json.JSONDecodeError:
         return None
-    hs = d.get("hs")
-    if not hs or not str(hs).strip().isdigit():
+    hs6 = d.get("hs6") or d.get("hs")
+    if not hs6 or not str(hs6).strip().isdigit():
         return None
-    return {"hs": str(hs).strip()[:4], "product": d.get("product")}
+    hs6 = str(hs6).strip()[:6]
+    return {"hs": hs6[:4], "hs6": hs6, "product": d.get("product"),
+            "sido": d.get("sido"), "sgg": d.get("sgg")}
 
 
 def _parse_qual(text: str) -> dict:

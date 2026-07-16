@@ -227,17 +227,23 @@ def analyze(req: dict) -> str:
             docs["trend_note"] = trend["note"]
         # 수출 추세 (관세청 품목 통계, best-effort) — HS 추정 후 전국 수출 YoY.
         # 품목 단위 근사치라 점수 미반영 — LLM 근거·리포트 '참고' 표기 전용.
-        trade_info = None
+        trade_info, trade_region = None, None
         if (config.CUSTOMS_COUNTRY_API_KEY and config.ANTHROPIC_API_KEY
                 and (docs.get("periodic") or {}).get("text")):
             try:
                 hs = llm.extract_hs(docs["periodic"]["text"])
                 if hs:
                     trade_info = trade.export_yoy(hs["hs"], hs.get("product"))
+                    # 시군구 프록시 — 공장 소재지가 추출된 경우만 (특이성 ↑)
+                    if hs.get("sido") and hs.get("sgg"):
+                        trade_region = trade.region_export_yoy(
+                            hs["hs6"], hs["sido"], hs["sgg"])
             except Exception as e:                    # noqa: BLE001
                 print(f"[query] 수출 통계 조회 실패(무시): {e}")
         if trade_info:
             docs["trade_note"] = trade_info["note"]
+        if trade_region:
+            docs["trade_region_note"] = trade_region["note"]
 
         qual, qual_fail = None, None
         if config.ANTHROPIC_API_KEY and (docs.get("periodic") or docs.get("disclosure_texts")
@@ -295,6 +301,9 @@ def analyze(req: dict) -> str:
             ctx["valuation_bullets"].append(f"검색 관심도(보조): {trend['note']}")
         if trade_info:
             ctx["valuation_bullets"].append(f"수출 추세(보조): {trade_info['note']}")
+        if trade_region:
+            ctx["valuation_bullets"].append(
+                f"수출 추세(시군구 프록시): {trade_region['note']}")
         ctx["section_title"] = "단도 6개 렌즈 평가"
         ctx["section_scores"] = [
             (report_labels.SECTION_KR[k], secs[k]["total"],

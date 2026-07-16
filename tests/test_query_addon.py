@@ -342,3 +342,65 @@ def test_dhandho_target_neutralized_when_deep_value_unfit():
     assert "매수영역 아님" in r["entry"]
     assert "현재가 이하" in r["targets"]["6개월"] and "수렴 가능" not in r["targets"]["6개월"]
     assert "부적용" in r["targets"]["3년"]
+
+
+# ──────────────────────────── TTM 자동 백필 · 뉴스 그라운딩 (애드온)
+
+def test_news_rss_parsing():
+    from dhandho import news
+    raw = """<rss><channel>
+    <item><title>삼성전자, 2분기 실적 반등 전망</title>
+      <pubDate>Tue, 15 Jul 2026 08:00:00 GMT</pubDate>
+      <source url="https://x">한국경제</source></item>
+    <item><title><![CDATA[반도체 업황 회복세 &amp; 수출 증가]]></title>
+      <pubDate>Mon, 14 Jul 2026 02:00:00 GMT</pubDate>
+      <source url="https://y">연합뉴스</source></item>
+    </channel></rss>"""
+    items = news._parse_rss(raw)
+    assert len(items) == 2
+    assert items[0]["title"] == "삼성전자, 2분기 실적 반등 전망"
+    assert items[0]["source"] == "한국경제"
+    assert "&" in items[1]["title"]                   # CDATA·엔티티 해제
+
+
+def test_llm_doc_text_renders_news_and_market_note():
+    from dhandho import llm
+    docs = {"news": [{"title": "급락 원인은 일회성 소송 충당금", "date": "0715",
+                      "source": "매경"}],
+            "market_note": "하락의 88%가 지수 동반 하락(β≈1)"}
+    out = llm._doc_text(docs)
+    assert "뉴스 헤드라인" in out and "일회성 소송 충당금" in out
+    assert "tier 3" in out                            # 미디어 계층 명시
+    assert "시장 요인 분해" in out and "88%" in out
+
+
+def test_backfill_company_upserts_row(monkeypatch):
+    import pandas as pd
+    from dhandho import dart, pit, storage
+    from run_quarterly import FIN_COLUMNS
+
+    monkeypatch.setattr(dart, "get_financials", lambda c, y, r: [{"dummy": 1}])
+    monkeypatch.setattr(dart, "normalize_financials",
+                        lambda rows: {"revenue": 100.0, "total_assets": 500.0})
+    existing = pd.DataFrame([{c: None for c in FIN_COLUMNS} | {"ticker": "000001"},
+                             {c: None for c in FIN_COLUMNS} | {"ticker": "005930"}],
+                            columns=FIN_COLUMNS)
+    monkeypatch.setattr(storage, "exists", lambda p: True)
+    monkeypatch.setattr(storage, "read_parquet", lambda p: existing.copy())
+    uploaded = {}
+    monkeypatch.setattr(storage, "upload_parquet",
+                        lambda df, p: uploaded.update({"df": df, "path": p}))
+    ok = pit.backfill_company("005930", "00126380", 2025, "11013")
+    assert ok
+    assert uploaded["path"] == "financials/2025_11013.parquet"
+    df = uploaded["df"]
+    assert len(df) == 2                               # 교체(업서트) — 중복 없음
+    row = df[df["ticker"] == "005930"].iloc[0]
+    assert row["revenue"] == 100.0 and row["corp_code"] == "00126380"
+
+
+def test_backfill_company_rejects_empty(monkeypatch):
+    from dhandho import dart, pit
+    monkeypatch.setattr(dart, "get_financials", lambda c, y, r: [])
+    monkeypatch.setattr(dart, "normalize_financials", lambda rows: {})
+    assert pit.backfill_company("005930", "00126380", 2025, "11013") is False

@@ -15,8 +15,8 @@ import datetime as dt
 
 import config
 from dhandho import (asymmetry, dart, frameworks, frameworks_ackman,
-                     frameworks_lynch, gate, krx, llm, market, metrics, notify,
-                     pit, query_parser, report_format, report_labels,
+                     frameworks_lynch, gate, krx, llm, market, metrics, news,
+                     notify, pit, query_parser, report_format, report_labels,
                      target_price)
 from run_trigger_a import _shareholder_summary
 
@@ -107,7 +107,9 @@ def analyze(req: dict) -> str:
     close, mktcap = row.get("close"), row["mktcap"]
     shares = (mktcap / close) if close else None
 
-    fins, history, fin_as_of = pit.load_financials_asof(basis, require_ticker=ticker)
+    fin_meta: dict = {}
+    fins, history, fin_as_of = pit.load_financials_asof(basis, require_ticker=ticker,
+                                                        meta=fin_meta)
     if ticker not in fins:
         raise RuntimeError(f"{ticker}: 기준일 이전 재무 SSOT 없음")
 
@@ -117,6 +119,32 @@ def analyze(req: dict) -> str:
         for t, f in fins.items()
     }
     m = metrics_all[ticker]
+
+    # TTM 손익 결측 자동 보정 — 전년 동기/연간 조각이 SSOT에 없으면 해당 기업만
+    # DART에서 재입수해 적재 후 재계산한다 (1회, best-effort).
+    ttm_backfilled = False
+    _corp0 = fins[ticker].get("corp_code")
+    if (config.DART_API_KEY and _corp0 and fin_meta.get("reprt")
+            and fin_meta["reprt"] != dart.REPRT_ANNUAL
+            and any(f.endswith(("_flow_basis_mismatch", "_ttm_fallback_annual"))
+                    for f in (m.get("flags") or []))):
+        fixed = 0
+        for y, r in ((fin_meta["year"] - 1, fin_meta["reprt"]),
+                     (fin_meta["year"] - 1, dart.REPRT_ANNUAL),
+                     (fin_meta["year"], fin_meta["reprt"])):
+            try:
+                fixed += pit.backfill_company(ticker, _corp0, y, r)
+            except RuntimeError as e:
+                print(f"[query] 재무 백필 실패(무시) {y}_{r}: {e}")
+        if fixed:
+            fins, history, fin_as_of = pit.load_financials_asof(
+                basis, require_ticker=ticker, meta=fin_meta)
+            m = metrics.compute_derived(
+                fins[ticker], mktcap=mktcap, history=history.get(ticker) or None)
+            metrics_all[ticker] = m
+            ttm_backfilled = True
+            print(f"[query] TTM 재무 백필 완료({fixed}개 보고서) — 재채점")
+
     peers = {k: [x[k] for x in metrics_all.values() if x.get(k) is not None]
              for k in ("ev_ebit", "per", "pbr", "psr",
                        "net_cash_to_mktcap", "ncav_to_mktcap")}
@@ -180,9 +208,18 @@ def analyze(req: dict) -> str:
                 except RuntimeError:
                     pass
             docs["disclosure_texts"] = texts
+        # 뉴스 헤드라인 (tier 3) — 급등/급락 사유 그라운딩 보조. 실패해도 무시.
+        try:
+            docs["news"] = news.search_news(f"{req['name']} 주가")
+        except Exception as e:                        # noqa: BLE001
+            print(f"[query] 뉴스 검색 실패(무시): {e}")
+        # 뉴스가 없으면 시장 요인 분해(β·지수 동반락)라도 근거로 공급
+        if not docs.get("news") and decline and decline.get("note"):
+            docs["market_note"] = decline["note"]
 
         qual, qual_fail = None, None
-        if config.ANTHROPIC_API_KEY and (docs.get("periodic") or docs.get("disclosure_texts")):
+        if config.ANTHROPIC_API_KEY and (docs.get("periodic") or docs.get("disclosure_texts")
+                                         or docs.get("news")):
             try:
                 extracted = llm.extract_passages({ticker: docs})
                 qual = llm.score_single(ticker, extracted[ticker])
@@ -328,6 +365,9 @@ def analyze(req: dict) -> str:
     ctx["checklist"] = (checklist_override if checklist_override is not None
                         else _CHECKLIST_COMMON + _CHECKLIST_SCHEME.get(scheme, []))
     ctx["data_status"] = report_labels.translate_flags(flags)
+    if scheme == "dhandho" and ttm_backfilled:
+        ctx["data_status"].append(
+            "누락됐던 전년 동기 재무를 DART에서 자동 재입수해 TTM 손익을 보정·재채점했습니다.")
     ctx["handoff"] = _handoff_lines(req, basis, flags=sorted(set(flags)), **ho)
     return report_format.build(req, ctx)
 

@@ -33,7 +33,7 @@ on:
         required: false
         default: "false"
       basis:
-        description: "재무 기준 보고서 강제 (트리거_a 전용, 예: 2025_11014)"
+        description: "재무 기준 보고서 강제 (trigger_a 전용, 예: 2025_11014)"
         required: false
         default: ""
 

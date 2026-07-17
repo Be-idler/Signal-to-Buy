@@ -13,6 +13,7 @@ on:
     types:
       - signal-to-buy       # trigger_a (권장 event_type)
       - signal-notify       # trigger_b (권장 event_type)
+      - notify-dispatch     # trigger_b (기존 cron-job.org 잡이 쓰는 event_type)
       - trigger_a           # 별칭 허용
       - trigger_b
       - "Signal to Buy"     # cron-job.org 잡 이름을 그대로 쓴 경우도 허용
@@ -32,7 +33,7 @@ on:
         required: false
         default: "false"
       basis:
-        description: "재무 기준 보고서 강제 (trigger_a 전용, 예: 2025_11014)"
+        description: "재무 기준 보고서 강제 (트리거_a 전용, 예: 2025_11014)"
         required: false
         default: ""
 
@@ -78,7 +79,7 @@ jobs:
             echo "stage=${{ github.event.inputs.stage }}" >> "$GITHUB_OUTPUT"
           else
             case "${{ github.event.action }}" in
-              signal-notify|trigger_b|"Signal notify")
+              signal-notify|notify-dispatch|trigger_b|"Signal notify")
                 echo "stage=trigger_b" >> "$GITHUB_OUTPUT" ;;
               *)
                 echo "stage=trigger_a" >> "$GITHUB_OUTPUT" ;;

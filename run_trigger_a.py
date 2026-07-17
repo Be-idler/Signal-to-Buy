@@ -25,7 +25,7 @@ import pandas as pd
 
 import config
 from dhandho import (dart, frameworks, gate, krx, llm, market, metrics, news, notify,
-                     rsi, storage, trends)
+                     rsi, storage, trade, trends)
 
 # 트랙1은 항상 **전영업일** 데이터로 분석한다 — KRX OpenAPI가 시세를 익영업일
 # 오전 08:00경 발행하기 때문(당일 종가는 그날 안엔 절대 안 나온다). 크론은 월–금
@@ -351,11 +351,32 @@ def main(argv: list[str] | None = None) -> int:
                     trend_note = tr["note"] if tr else None
                 except Exception as e:                # noqa: BLE001
                     print(f"[trigger_a] 트렌드 조회 실패(무시) {t}: {e}")
+                # 수출 통계 (관세청 — 전국 품목 + 시군구 프록시, best-effort).
+                # 구조적 실적 훼손/성장성 판단 근거(D2·D3) — 점수 직접 반영 없음.
+                trade_note = None
+                if (config.CUSTOMS_COUNTRY_API_KEY and config.ANTHROPIC_API_KEY
+                        and periodic and periodic.get("text")):
+                    try:
+                        hs = llm.extract_hs(periodic["text"])
+                        notes = []
+                        if hs:
+                            ti = trade.export_yoy(hs["hs"], hs.get("product"))
+                            if ti:
+                                notes.append(ti["note"])
+                            if hs.get("sido") and hs.get("sgg"):
+                                ri = trade.region_export_yoy(
+                                    hs["hs6"], hs["sido"], hs["sgg"])
+                                if ri:
+                                    notes.append(ri["note"])
+                        trade_note = "\n".join(notes) or None
+                    except Exception as e:            # noqa: BLE001
+                        print(f"[trigger_a] 수출 통계 조회 실패(무시) {t}: {e}")
                 docs[t] = {"disclosures": disclosures, "executives": execs,
                            "periodic": periodic,
                            "disclosure_texts": disclosure_texts,
                            "news": news_items,
-                           "trend_note": trend_note}
+                           "trend_note": trend_note,
+                           "trade_note": trade_note}
                 storage.save_json(docs[t], f"delta/{date_str}_{t}.json")
                 finalists[t]["disclosures"] = disclosures
                 finalists[t]["insider"] = insider[:30]

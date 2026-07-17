@@ -55,6 +55,8 @@ jobs:
       DART_API_KEY: ${{ secrets.DART_API_KEY }}
       KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CUSTOMS_COUNTRY_API_KEY: ${{ secrets.CUSTOMS_COUNTRY_API_KEY }}
+      CUSTOMS_REGION_API_KEY: ${{ secrets.CUSTOMS_REGION_API_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}

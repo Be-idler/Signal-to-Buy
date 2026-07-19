@@ -1,4 +1,4 @@
-from dhandho.gate import decide_signal, quant_gate_pass
+from dhandho.gate import decide_signal, quant_gate_pass, quant_signal_gate_pass
 
 
 def _result(a=4.5, d=4.0, total=4.2, a_flags=None, d_flags=None, flags=None):
@@ -20,6 +20,17 @@ def test_quant_gate_pass():
     assert quant_gate_pass({"A_quant": 3.0, "D_quant": 3.0})
     assert not quant_gate_pass({"A_quant": 2.9, "D_quant": 5.0})
     assert not quant_gate_pass({"A_quant": 5.0, "D_quant": 2.9})
+
+
+def test_quant_signal_gate_pass():
+    # §13.4 개정 — A/D 최소선(3.0) + 재정규화 총점(SCORE_QUANT_SIGNAL_MIN=4.0)
+    assert quant_signal_gate_pass({"A_quant": 3.0, "D_quant": 3.0, "total_signal": 4.0})
+    assert not quant_signal_gate_pass(
+        {"A_quant": 3.0, "D_quant": 3.0, "total_signal": 3.9})   # 총점 미달
+    assert not quant_signal_gate_pass(
+        {"A_quant": 2.9, "D_quant": 5.0, "total_signal": 4.5})   # A 미달
+    assert not quant_signal_gate_pass(
+        {"A_quant": 5.0, "D_quant": 2.9, "total_signal": 4.5})   # D 미달
 
 
 def test_buy():

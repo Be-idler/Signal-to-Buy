@@ -1,7 +1,10 @@
 """2단계 게이트 (명세서 §13.4) — v1 검증 로직 계승.
 
-- quant_gate_pass:  트리거 A 정량 사전필터 (A_quant·D_quant ≥ 3.0)
-- decide_signal:    트리거 B 최종 게이트 (LLM 정성 포함 전체 A·D + 플래그 + 총점)
+- quant_gate_pass:         트리거 A 1차 정량 필터 (A_quant·D_quant ≥ 3.0, A/C/D만)
+- quant_signal_gate_pass:  트리거 A 2차 정량 필터 — 매수 시그널 도출(§13.4 개정,
+                           A~F 전 섹션 재정규화 총점 ≥ SCORE_QUANT_SIGNAL_MIN).
+                           통과 종목만 LLM 재배점 대상이 된다.
+- decide_signal:           트리거 B 최종 게이트 (LLM 정성 포함 전체 A·D + 플래그 + 총점)
 
 시스템은 후보 알림까지만 — 최종 매수/매도 판단은 사람이 한다.
 """
@@ -11,9 +14,21 @@ import config
 
 
 def quant_gate_pass(quant: dict) -> bool:
-    """score_dhandho_quant 결과로 2차 정량 필터 통과 여부."""
+    """score_dhandho_quant 결과로 1차 정량 필터 통과 여부(A/C/D만, 가장 저렴)."""
     return (quant["A_quant"] >= config.GATE_A_MIN
             and quant["D_quant"] >= config.GATE_D_MIN)
+
+
+def quant_signal_gate_pass(quant_signal: dict) -> bool:
+    """score_dhandho_quant_signal 결과로 매수 시그널 판정(§13.4 개정).
+
+    A·D 최소선(3.0)은 유지하되, LLM 전용 항목을 제외·재정규화한 A~F 전체
+    총점이 SCORE_QUANT_SIGNAL_MIN(기본 4.0, SCORE_BUY_MIN과 동일)을 넘어야
+    LLM 재배점 대상(신호 종목)이 된다.
+    """
+    return (quant_signal["A_quant"] >= config.GATE_A_MIN
+            and quant_signal["D_quant"] >= config.GATE_D_MIN
+            and quant_signal["total_signal"] >= config.SCORE_QUANT_SIGNAL_MIN)
 
 
 def decide_signal(result: dict) -> dict:

@@ -1,11 +1,19 @@
 """트리거 A (UTC 11:00 = KST 20:00) — 트랙1 일일 파이프라인 전반부.
 
-흐름(지시문 2단계에서 보정된 순서 — 시총 결합 결함 수정):
+흐름(§13.4 개정 — 매수 시그널을 정량만으로 먼저 도출하고, LLM은 시그널
+종목에만 태운다. 이전엔 A/D만 보는 값싼 게이트만 거쳐 finalists 전체에
+정성 자료를 모았지만, B4·D2·D3·F1·F3가 LLM 그라운딩 전엔 2.5로 보수적
+캡되다 보니 최종 총점이 매수 임계(4.0)에 사실상 못 미쳤다 — 이제 그
+항목들은 캡 대신 가중치에서 제외·재정규화해 순수 정량만으로 먼저 매수
+시그널을 판정하고, LLM은 시그널 종목의 재배점(그라운딩)에만 쓴다):
 ① KRX EOD(가격+시총) 수집 → 일별 prices/eod_{date}.parquet 적재
 ② RSI<30 1차 후보
 ③ 후보의 분기 재무 + 당일 시총 결합 → metrics.compute_derived 재호출
-④ 결합 지표로 정량 스코어링(A_quant·D_quant) → finalists
-⑤ finalists 정성 자료 수집(DART 정정·수시공시·임원약력) → 델타 적재
+④ 1차 정량 필터(A_quant·D_quant≥3.0, DART 호출 없음) → pre_finalists
+④' 배당·자기주식·내부자 소유보고(결정론 입력) 확보 후 A~F 전 섹션
+    재정규화 총점(LLM 전용 항목 제외)으로 매수 시그널 도출 → finalists
+⑤ finalists(시그널 통과분)만 정기보고서 본문·수시공시 원문·뉴스·트렌드·
+   수출통계 수집 → 델타 적재 (문서수집·LLM 비용을 시그널 종목으로 한정)
 ⑥ Haiku 추출 → Sonnet 채점 Batch 제출(async, −50%) → 체크포인트 저장
 
 KRX 휴장일은 평일이어도 전체 스킵.
@@ -249,8 +257,8 @@ def main(argv: list[str] | None = None) -> int:
                  for k in ("ev_ebit", "per", "pbr", "psr",
                            "net_cash_to_mktcap", "ncav_to_mktcap")}
 
-        # ④ 정량 스코어링 → 2차 게이트 → finalists
-        finalists: dict[str, dict] = {}
+        # ④ 1차 정량 필터 (§13.4, A/C/D만 — DART 호출 없이 가장 저렴) → pre_finalists
+        pre_finalists: dict[str, dict] = {}
         scored: dict[str, dict] = {}
         for t in oversold:
             m = metrics_all.get(t)
@@ -259,9 +267,9 @@ def main(argv: list[str] | None = None) -> int:
             quant = frameworks.score_dhandho_quant(m, peers=peers)
             scored[t] = quant
             if gate.quant_gate_pass(quant):
-                finalists[t] = {"rsi": round(oversold[t], 2), "quant": quant,
-                                "name": eod.get(t, {}).get("name"), "metrics": m}
-        print(f"[trigger_a] finalists after quant gate: {sorted(finalists)}")
+                pre_finalists[t] = {"rsi": round(oversold[t], 2), "quant": quant,
+                                    "name": eod.get(t, {}).get("name"), "metrics": m}
+        print(f"[trigger_a] 1차 정량통과(A/D≥3.0): {sorted(pre_finalists)}")
 
         # 게이트 근접 상위 후보 기록 — 통과 0건인 날의 임계 적정성 점검·메시지 가시성
         near_misses = [
@@ -270,10 +278,56 @@ def main(argv: list[str] | None = None) -> int:
              "A_quant": round(q["A_quant"], 2), "D_quant": round(q["D_quant"], 2)}
             for t, q in sorted(scored.items(),
                                key=lambda kv: -(kv[1]["A_quant"] + kv[1]["D_quant"]))
-            if t not in finalists][:5]
+            if t not in pre_finalists][:5]
         for n in near_misses:
             print(f"[trigger_a] near-miss {n['ticker']} {n['name']} "
                   f"A {n['A_quant']} / D {n['D_quant']} (기준 각 3.0)")
+
+        # ④' 2차 정량 필터 (§13.4 개정) — A~F 전 섹션(LLM 전용 항목 제외·재정규화)
+        # 으로 매수 시그널을 직접 도출한다. E1·F2 결정론 입력을 위해 배당·자기
+        # 주식·내부자 소유보고만 먼저 가져온다 — 정기보고서 본문 등 무거운 수집은
+        # 이 게이트를 통과한 종목에만 뒤에서 수행해 정성 자료·LLM 비용을 시그널
+        # 종목으로 한정한다(이번 개편의 핵심).
+        finalists: dict[str, dict] = {}
+        signal_scored: dict[str, dict] = {}
+        pre_docs: dict[str, dict] = {}
+        bgn = (today - dt.timedelta(days=90)).strftime("%Y%m%d")
+        for t, entry in pre_finalists.items():
+            corp = corp_by.get(t)
+            disclosures, execs, insider = [], [], []
+            shareholder = None
+            if corp:
+                try:
+                    disclosures = dart.get_recent_disclosures(corp, bgn, date_str)
+                    execs = dart.get_executive_profiles(corp, today.year - 1)
+                    insider = dart.get_insider_transactions(corp)
+                    dividend = dart.get_dividend_info(corp, today.year - 1)
+                    treasury = dart.get_treasury_stock(corp, today.year - 1)
+                    shareholder = _shareholder_summary(dividend, treasury)
+                except RuntimeError as e:
+                    print(f"[trigger_a] delta fetch failed {t}: {e}")
+            pre_docs[t] = {"disclosures": disclosures, "executives": execs}
+            quant_signal = frameworks.score_dhandho_quant_signal(
+                entry["metrics"], peers=peers, disclosures=disclosures,
+                shareholder=shareholder, insider=insider)
+            signal_scored[t] = quant_signal
+            if gate.quant_signal_gate_pass(quant_signal):
+                finalists[t] = {**entry, "quant_signal": quant_signal,
+                                "disclosures": disclosures, "insider": insider[:30],
+                                "shareholder": shareholder}
+        print(f"[trigger_a] 매수 시그널(A~F 재정규화 총점≥{config.SCORE_QUANT_SIGNAL_MIN}): "
+              f"{sorted(finalists)}")
+
+        # 2차 게이트 근접 상위 — 1차는 통과했으나 총점 미달(시그널 임계 점검용)
+        signal_near_misses = [
+            {"ticker": t, "name": pre_finalists[t].get("name"),
+             "rsi": pre_finalists[t].get("rsi"),
+             "total_signal": round(q["total_signal"], 2)}
+            for t, q in sorted(signal_scored.items(), key=lambda kv: -kv[1]["total_signal"])
+            if t not in finalists][:5]
+        for n in signal_near_misses:
+            print(f"[trigger_a] signal near-miss {n['ticker']} {n['name']} "
+                  f"total_signal {n['total_signal']} (기준 {config.SCORE_QUANT_SIGNAL_MIN})")
 
         # 시장 요인 분해: 급락이 지수 동반인지(전 종목 시총합 프록시, 추가 API 없음).
         # 60일치 EOD가 이미 메모리에 있어 종목별 베타까지 비용 없이 산출.
@@ -293,30 +347,23 @@ def main(argv: list[str] | None = None) -> int:
 
         checkpoint = {"date": date_str, "finalists": {}, "batch_id": None,
                       "fin_basis": fin_basis, "oversold_count": len(oversold),
+                      "pre_finalist_count": len(pre_finalists),
                       "near_misses": _jsonable(near_misses),
+                      "signal_near_misses": _jsonable(signal_near_misses),
                       "peers_size": {k: len(v) for k, v in peers.items()}}
 
         if finalists:
-            # ⑤ 정성 자료 수집 (L-Δ 델타) — finalists 한정
-            #    + E1(배당·자기주식)·F2(내부자 소유보고) 결정론 입력 (v1 §4)
-            bgn = (today - dt.timedelta(days=90)).strftime("%Y%m%d")
+            # ⑤ 정성 자료 수집(정기보고서 본문·수시공시 원문·뉴스·트렌드·수출통계) —
+            # 매수 시그널 통과 종목 한정. 배당·자기주식·내부자·최근공시 목록은
+            # 앞 단계(pre_docs)에서 이미 받아온 것을 재사용한다.
             docs: dict[str, dict] = {}
             for t in finalists:
                 corp = corp_by.get(t)
-                disclosures, execs, insider = [], [], []
-                shareholder = None
+                disclosures = pre_docs[t]["disclosures"]
+                execs = pre_docs[t]["executives"]
                 periodic = None
                 disclosure_texts: list[dict] = []
                 if corp:
-                    try:
-                        disclosures = dart.get_recent_disclosures(corp, bgn, date_str)
-                        execs = dart.get_executive_profiles(corp, today.year - 1)
-                        insider = dart.get_insider_transactions(corp)
-                        dividend = dart.get_dividend_info(corp, today.year - 1)
-                        treasury = dart.get_treasury_stock(corp, today.year - 1)
-                        shareholder = _shareholder_summary(dividend, treasury)
-                    except RuntimeError as e:
-                        print(f"[trigger_a] delta fetch failed {t}: {e}")
                     # 정기보고서 본문(사업의 내용·MD&A) — B4·D3·F1 그라운딩의 핵심 원문.
                     # 제목 목록만 주면 LLM이 전 항목 '근거 부재'가 된다. best-effort.
                     try:
@@ -340,8 +387,8 @@ def main(argv: list[str] | None = None) -> int:
                                   f"{d0.get('rcept_no')}: {e}")
                 # 뉴스 헤드라인 (tier 3) — D2 급락 사유 보조 근거. best-effort.
                 news_items: list[dict] = []
+                nm = (eod.get(t) or {}).get("name") or t
                 try:
-                    nm = (eod.get(t) or {}).get("name") or t
                     news_items = news.search_news(f"{nm} 주가")
                 except Exception as e:                # noqa: BLE001
                     print(f"[trigger_a] 뉴스 검색 실패(무시) {t}: {e}")
@@ -378,13 +425,11 @@ def main(argv: list[str] | None = None) -> int:
                            "trend_note": trend_note,
                            "trade_note": trade_note}
                 storage.save_json(docs[t], f"delta/{date_str}_{t}.json")
-                finalists[t]["disclosures"] = disclosures
-                finalists[t]["insider"] = insider[:30]
-                finalists[t]["shareholder"] = shareholder
 
-            # ⑥ LLM: 그라운딩 대상은 A_quant 상위 LLM_MAX개 한정 (v1 토큰절감 2축)
+            # ⑥ LLM: 그라운딩 대상은 매수 시그널 총점 상위 LLM_MAX개 한정(안전상한)
             #    Haiku 추출(동기·저렴) → Sonnet 채점 Batch 제출(async, −50%)
-            llm_targets = sorted(finalists, key=lambda t: -finalists[t]["quant"]["A_quant"])
+            llm_targets = sorted(
+                finalists, key=lambda t: -finalists[t]["quant_signal"]["total_signal"])
             llm_targets = llm_targets[:config.LLM_MAX]
             extracted = llm.extract_passages({t: docs[t] for t in llm_targets})
             batch_id = llm.submit_batch(extracted)
@@ -396,12 +441,13 @@ def main(argv: list[str] | None = None) -> int:
         storage.save_json(checkpoint, f"checkpoints/trigger_a_{date_str}.json")
         print(f"[trigger_a] checkpoint saved for {date_str}")
 
-        # 하트비트 — A단계 생존 확인(후보→통과→배치). B는 당일 이 체크포인트로 발송.
+        # 하트비트 — A단계 생존 확인(후보→1차통과→시그널→배치). B는 당일 이 체크포인트로 발송.
         notify.send_heartbeat(
             notify.header_heartbeat(run_date)
-            + f"\nA: {note} · RSI후보 {len(oversold)} → 정량통과 {len(finalists)}"
+            + f"\nA: {note} · RSI후보 {len(oversold)} → 1차정량통과 {len(pre_finalists)}"
+              f" → 매수시그널 {len(finalists)}"
             + (f" → 배치제출 {len(checkpoint.get('llm_targets') or [])}"
-               if checkpoint.get("batch_id") else " → 배치 없음(통과 0)"))
+               if checkpoint.get("batch_id") else " → 배치 없음(시그널 0)"))
         return 0
     except Exception:
         notify.notify_failure("trigger_a", traceback.format_exc())

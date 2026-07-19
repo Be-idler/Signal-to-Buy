@@ -53,8 +53,31 @@ class _Section:
     def total(self) -> float:
         return round(sum(v["score"] * v["weight"] for v in self.subs.values()), 3)
 
+    def total_renorm(self, exclude: set[str] | None = None) -> float:
+        """exclude 항목을 가중치에서 빼고 나머지로 재정규화한 총점.
+
+        LLM 전용 항목(§13.4 개정 — score_dhandho_quant_signal)에 쓴다: '근거불충분
+        2.5 캡'과 달리 '이 단계에선 애초에 산출 대상이 아님' — 캡으로 총점을 깎지
+        않고 나머지 정량 하위점수만으로 판단한다. exclude가 전부이면 total()로 폴백.
+        """
+        exclude = exclude or set()
+        active = {k: v for k, v in self.subs.items() if k not in exclude}
+        if not active:
+            return self.total()
+        wsum = sum(v["weight"] for v in active.values())
+        return round(sum(v["score"] * v["weight"] for v in active.values()) / wsum, 3)
+
     def result(self) -> dict:
         return {"subscores": self.subs, "total": self.total(), "flags": self.flags}
+
+
+# LLM 그라운딩 전용 하위항목 (v1 §7: B4·D2·D3·F1·F3) + E2(상법수혜 — 정책 타임라인
+# 데이터소스 자체가 없어 현재 항상 미확보, LLM 유무와 무관하게 별도 갭이지만 매수
+# 시그널 단계에서는 동일하게 '산출 대상 아님'으로 취급해 총점에서 제외한다.
+LLM_ONLY_ITEMS: dict[str, set[str]] = {
+    "A": set(), "B": {"B4"}, "C": set(),
+    "D": {"D2", "D3"}, "E": {"E2"}, "F": {"F1", "F3"},
+}
 
 
 def _qual_score(qual: dict | None, key: str) -> float | None:
@@ -233,9 +256,11 @@ def _score_D(m: dict, qual: dict | None = None,
 def score_dhandho_quant(m: dict, peers: dict | None = None,
                         band_series: list[float] | None = None,
                         audit: dict | None = None) -> dict:
-    """트리거 A 정량 사전필터 (§13.4) — LLM 이전, 계산 가능한 정량만.
+    """트리거 A 1차 정량 필터 (§13.4) — LLM·DART델타 이전, A/C/D만(가장 저렴).
 
     D2·D3는 2.5 캡으로 보수적 산출. 반환: A/C/D 섹션 + A_quant·D_quant.
+    RSI 후보 전체에 거는 값싼 1차 체(트랙3 워치리스트 등에서도 그대로 사용) —
+    A~F 전 섹션·매수 시그널 판정은 score_dhandho_quant_signal 참조.
     """
     a = _score_A(m, peers)
     c = _score_C(m, peers, band_series)
@@ -245,6 +270,46 @@ def score_dhandho_quant(m: dict, peers: dict | None = None,
         "A_quant": a.total(), "D_quant": d.total(),
         "flags": sorted(set(a.flags + c.flags + d.flags + list(m.get("flags", [])))),
     }
+
+
+def score_dhandho_quant_signal(m: dict, peers: dict | None = None,
+                               band_series: list[float] | None = None,
+                               audit: dict | None = None,
+                               disclosures: list[dict] | None = None,
+                               shareholder: dict | None = None,
+                               insider: list[dict] | None = None) -> dict:
+    """트리거 A 2차 정량 필터 (§13.4 개정) — A~F 전 섹션, LLM 그라운딩 이전.
+
+    B4·D2·D3·F1·F3(LLM 전용)·E2(데이터소스 없음)는 2.5 캡 대신 가중치에서
+    제외하고 나머지 정량·결정론 하위점수(A/C 전부, B1~B3, D1·D4, E1·E3, F2)로
+    재정규화한다 — '근거불충분'이 아니라 '이 단계엔 원래 없는 항목'이기 때문에
+    캡으로 총점을 영구히 깎지 않는다.
+
+    이 총점(total_signal)이 매수 시그널 도출 기준이 된다: LLM 재배점은 이 시그널을
+    통과한 종목에만 수행하고(§비용 절감), 재배점 후 최종 판정은 여전히
+    gate.decide_signal(score_dhandho 전체 결과)로 사람에게 보고한다.
+    """
+    a = _score_A(m, peers)
+    b = _score_B(m, qual=None)
+    c = _score_C(m, peers, band_series)
+    d = _score_D(m, qual=None, audit=audit)
+    e = _score_E(m, shareholder, policy=None, disclosures=disclosures)
+    f = _score_F(m, qual=None, insider=insider)
+
+    totals = {
+        "A": a.total(), "B": b.total_renorm(LLM_ONLY_ITEMS["B"]),
+        "C": c.total(), "D": d.total_renorm(LLM_ONLY_ITEMS["D"]),
+        "E": e.total_renorm(LLM_ONLY_ITEMS["E"]), "F": f.total_renorm(LLM_ONLY_ITEMS["F"]),
+    }
+    total_signal = round(sum(totals[k] * w
+                             for k, w in config.DHANDHO_SECTION_WEIGHTS.items()), 3)
+    sections = {"A": a.result(), "B": b.result(), "C": c.result(),
+               "D": d.result(), "E": e.result(), "F": f.result()}
+    flags = sorted(set(sum((sections[k]["flags"] for k in sections), [])
+                       + list(m.get("flags", []))))
+    return {"framework": "dhandho_quant_signal", "sections": sections,
+            "section_totals_signal": totals, "total_signal": total_signal,
+            "A_quant": totals["A"], "D_quant": totals["D"], "flags": flags}
 
 
 def _score_B(m: dict, qual: dict | None) -> _Section:

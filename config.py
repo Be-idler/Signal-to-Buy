@@ -52,6 +52,9 @@ GATE_A_MIN = 3.0                # 하방보호 게이트
 GATE_D_MIN = 3.0                # 밸류트랩 게이트
 SCORE_BUY_MIN = 4.0             # 총점 ≥4.0 & 게이트 통과 → 적극/분할 후보
 SCORE_WATCH_MIN = 3.0           # 3.0~4.0 → 관심
+# 매수 시그널(LLM 이전, §13.4 개정) 임계 — 기본은 SCORE_BUY_MIN과 동일하게 두되
+# 백테스트로 별도 보정할 수 있도록 독립 상수로 분리.
+SCORE_QUANT_SIGNAL_MIN = SCORE_BUY_MIN
 INSUFFICIENT_CAP = 2.5          # 근거불충분 상한 (§13.0)
 
 # 단도 섹션 가중 (v1 §3~8: 하방 25 / 사업질 20 / 밸류 20 / 밸류트랩 15 / 촉매 10 / 경영진 10)

@@ -89,6 +89,14 @@ def _market_factor_line(entry: dict) -> str | None:
     return base
 
 
+def _signal_line(entry: dict, decision: dict) -> str | None:
+    """정량 시그널(LLM 이전) → LLM 재배점 후 총점 — 개편(§13.4) 투명성 표기."""
+    sig = (entry.get("quant_signal") or {}).get("total_signal")
+    if sig is None:
+        return None
+    return f"  정량시그널 {sig:.2f} → LLM 재배점 후 {decision['total']:.2f}"
+
+
 def _format_buy(ticker: str, entry: dict, decision: dict, result: dict,
                 names: dict) -> str:
     """BUY 상세 (v1 format_buy 준용)."""
@@ -98,6 +106,9 @@ def _format_buy(ticker: str, entry: dict, decision: dict, result: dict,
         f"(A {decision['A']:.2f} / D {decision['D']:.2f})",
         f"  {decision['reason']}",
     ]
+    sl = _signal_line(entry, decision)
+    if sl:
+        lines.append(sl)
     secs = result["sections"]
     lines.append("  섹션: " + " ".join(f"{k}={secs[k]['total']:.1f}" for k in "ABCDEF"))
     mf = _market_factor_line(entry)
@@ -112,6 +123,9 @@ def _format_digest_row(ticker: str, entry: dict, decision: dict, qual: dict,
     select = qual.get("selection_reason") or "선정사유 미확보"
     lines = [f"• {_label(ticker, entry, names)} — 총점 {decision['total']:.2f} · "
              f"{decision['verdict']} · RSI {entry.get('rsi')}"]
+    sl = _signal_line(entry, decision)
+    if sl:
+        lines.append(sl)
     lines += [f"  {ln}" for ln in _drop_lines(qual, entry, m)]
     lines.append(f"  선정사유: {select}")
     return "\n".join(lines)
@@ -188,15 +202,25 @@ def main(argv: list[str] | None = None) -> int:
         finalists: dict = ckpt.get("finalists") or {}
         if not finalists:
             n_oversold = ckpt.get("oversold_count")
+            n_pre = ckpt.get("pre_finalist_count")
             lines = [notify.header_daily(date_str),
-                     "정량 게이트 통과 종목 없음"
-                     + (f" (RSI<30 후보 {n_oversold}종목)" if n_oversold else "")]
+                     "매수 시그널 종목 없음"
+                     + (f" (RSI<30 후보 {n_oversold}종목"
+                        + (f" → 1차정량통과 {n_pre}종목" if n_pre is not None else "")
+                        + ")" if n_oversold else "")]
             near = ckpt.get("near_misses") or []
             if near:
-                lines.append("게이트 근접 상위 (하방 A·안정 D 기준 각 3.0):")
+                lines.append("1차 게이트 근접 상위 (하방 A·안정 D 기준 각 3.0):")
                 lines += [f"• {n.get('name') or n['ticker']} ({n['ticker']}) "
                           f"RSI {n['rsi']} — A {n['A_quant']:.1f} / D {n['D_quant']:.1f}"
                           for n in near]
+            signal_near = ckpt.get("signal_near_misses") or []
+            if signal_near:
+                lines.append("매수 시그널 근접 상위 (A~F 재정규화 총점 기준 "
+                             f"{config.SCORE_QUANT_SIGNAL_MIN} 미달):")
+                lines += [f"• {n.get('name') or n['ticker']} ({n['ticker']}) "
+                          f"RSI {n['rsi']} — 총점 {n['total_signal']:.2f}"
+                          for n in signal_near]
             send("\n".join(lines))
             mark_sent(date_str, ckpt)
             return 0

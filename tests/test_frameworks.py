@@ -1,8 +1,10 @@
 import math
 
-from dhandho import frameworks
+import config
+from dhandho import frameworks, gate
 from dhandho.frameworks import (rank_magic_formula, rank_universe, score_buffett,
-                                score_dhandho, score_dhandho_quant, score_ltgg,
+                                score_dhandho, score_dhandho_quant,
+                                score_dhandho_quant_signal, score_ltgg,
                                 score_outsiders)
 
 
@@ -81,6 +83,53 @@ def test_d4_audit_going_concern():
     q = score_dhandho_quant(_metrics(), audit={"opinion": "적정",
                                                "going_concern_doubt": True})
     assert q["D"]["subscores"]["D4"]["score"] == 1.0
+
+
+# ─────────────────────────────────── §13.4 개정 — 매수 시그널(LLM 이전)
+
+def test_quant_signal_excludes_llm_items_from_cap():
+    # B4·D2·D3·F1·F3(LLM 전용)는 2.5 캡 대신 가중치에서 제외·재정규화된다 —
+    # 하위점수 자체는 표기용으로 캡 기록되지만, D 섹션 총점은 기존
+    # score_dhandho_quant의 캡 방식보다 높아야 한다(재정규화 효과).
+    m = _metrics()
+    capped = score_dhandho_quant(m)
+    signal = score_dhandho_quant_signal(m)
+    assert signal["sections"]["D"]["subscores"]["D2"]["score"] == 2.5
+    assert signal["section_totals_signal"]["D"] > capped["D_quant"]
+
+
+def test_quant_signal_e2_capped_but_excluded_from_total():
+    # E2(상법수혜)는 정책 데이터소스가 없어 늘 None — 하위점수는 표기용 2.5
+    # 캡이지만, 재정규화 총점(E)에는 반영되지 않는다.
+    m = _metrics()
+    signal = score_dhandho_quant_signal(
+        m, shareholder={"dividend_paid": True, "retired_any": True,
+                        "unretired_treasury": False},
+        disclosures=[{"report_nm": "기업가치 제고 계획 공시"}])
+    assert signal["sections"]["E"]["subscores"]["E2"]["score"] == 2.5
+    assert signal["section_totals_signal"]["E"] == 4.5   # E1·E3만으로 산출(둘 다 4.5)
+
+
+def test_quant_signal_reaches_buy_without_llm():
+    # 핵심 회귀 테스트 — 정량·결정론 입력만으로(LLM qual 없이) 매수 시그널
+    # 임계(SCORE_QUANT_SIGNAL_MIN)에 도달할 수 있어야 한다. 개편 전에는
+    # B4·D2·D3·F1·F3의 2.5 캡 때문에 구조적으로 도달이 불가능했다.
+    m = _metrics()
+    signal = score_dhandho_quant_signal(
+        m, peers=_peers(),
+        disclosures=[{"report_nm": "기업가치 제고 계획 공시"}],
+        shareholder={"dividend_paid": True, "retired_any": True,
+                     "unretired_treasury": False},
+        insider=[{"change": 1000.0}])
+    assert signal["total_signal"] >= config.SCORE_QUANT_SIGNAL_MIN
+    assert gate.quant_signal_gate_pass(signal)
+
+
+def test_quant_signal_gate_blocks_weak_fundamentals():
+    m = _metrics(net_cash_to_mktcap=None, ncav_to_mktcap=None,
+                interest_coverage=1.0, debt_ratio=3.0, fcf_negative_years=3)
+    signal = score_dhandho_quant_signal(m)
+    assert not gate.quant_signal_gate_pass(signal)
 
 
 # ─────────────────────────────────── C 섹션 (peers·폴백)

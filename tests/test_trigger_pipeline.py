@@ -202,3 +202,72 @@ def test_digest_row_merges_when_reason_missing():
         "000000", entry, decision, {}, {"drawdown_52w": -0.35}, {})
     drop_line = next(l for l in row.split("\n") if "하락사유" in l)
     assert "52주 고점 대비" in drop_line and "시장요인 참고" in drop_line
+
+# ───────────────────────────── 1차 정량통과 일일 메시지 (§13.4 개정 후속)
+
+def test_quant_drop_reason_market_driven():
+    mc = {"beta": 1.1, "stock_dd": -0.12, "market_dd": -0.08}
+    line = run_trigger_b._quant_drop_reason(mc, -0.30)
+    assert "52주 고점 대비 -30%" in line
+    assert "시장 요인이 주된 배경" in line          # 1.1×(-8%)/(-12%) ≈ 73%
+
+
+def test_quant_drop_reason_stock_specific():
+    mc = {"beta": 0.8, "stock_dd": -0.30, "market_dd": -0.03}
+    line = run_trigger_b._quant_drop_reason(mc, None)
+    assert "종목 고유 요인 우세" in line
+
+
+def test_quant_drop_reason_no_data():
+    assert run_trigger_b._quant_drop_reason({}, None) == "하락사유 미확보"
+
+
+def test_quant_sel_reason_healthy():
+    sel = {"revenue_cagr_5y": 0.08, "op_income_slope": 0.05,
+           "fcf_negative_years": 0, "net_cash_to_mktcap": 0.4,
+           "interest_coverage": 12.0}
+    line = run_trigger_b._quant_sel_reason(sel, 4.3, 3.2)
+    assert "매출 5년 CAGR +8%" in line
+    assert "FCF 최근 5년 연속 흑자" in line
+    assert "구조적 실적 악화 신호 없음" in line
+    assert "하방 A 4.3·안정 D 3.2" in line
+
+
+def test_quant_sel_reason_flags_weak_trend():
+    sel = {"revenue_cagr_5y": -0.10, "op_income_slope": -0.08}
+    line = run_trigger_b._quant_sel_reason(sel, 3.5, 3.0)
+    assert "⚠️ 추세 지표 일부 약화" in line
+
+
+def test_format_pre_row_quant_only():
+    info = {"name": "부스타", "rsi": 19.52, "total_signal": 3.4,
+            "A_quant": 3.9, "D_quant": 3.0,
+            "market_context": {"beta": 1.0, "stock_dd": -0.10, "market_dd": -0.08},
+            "news": [{"title": "부스타 신제품 출시", "date": "2026-07-20"}],
+            "sel": {"revenue_cagr_5y": 0.05, "op_income_slope": 0.03,
+                    "fcf_negative_years": 0, "drawdown_52w": -0.35}}
+    row = run_trigger_b._format_pre_row("008470", info)
+    assert row.splitlines()[0] == "• 부스타 (008470) — RSI 19.52 · 총점 3.40 (정량)"
+    assert "하락사유:" in row and "선정사유:" in row
+    assert "참고 뉴스: 부스타 신제품 출시 (2026-07-20)" in row
+
+
+def test_format_pre_row_grounded_uses_llm():
+    info = {"name": "아주IB투자", "rsi": 29.09, "total_signal": 4.1,
+            "A_quant": 4.0, "D_quant": 3.5, "sel": {}}
+    scored_item = {"grounded": True,
+                   "decision": {"total": 3.11},
+                   "qual": {"drop_reason": "벤처투자 회수시장 위축(일회성)",
+                            "selection_reason": "운용자산 성장 지속"},
+                   "entry": {"metrics": {}, "market_context": {}}}
+    row = run_trigger_b._format_pre_row("027360", info, scored_item)
+    assert "총점 3.11 (LLM 재배점)" in row
+    assert "하락사유: 벤처투자 회수시장 위축(일회성)" in row
+    assert "선정사유: 운용자산 성장 지속" in row
+
+
+def test_pre_rows_sorted_by_total_signal():
+    pre = {"A00001": {"total_signal": 3.1, "sel": {}},
+           "B00002": {"total_signal": 3.9, "sel": {}}}
+    rows = run_trigger_b._pre_rows(pre)
+    assert rows[0].startswith("• B00002") or "B00002" in rows[0].splitlines()[0]

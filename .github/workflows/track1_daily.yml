@@ -11,9 +11,11 @@ name: track1-daily
 on:
   repository_dispatch:
     types:
-      - signal-to-buy       # trigger_a (권장 event_type)
-      - signal-notify       # trigger_b (권장 event_type)
+      - signal-to-buy       # trigger_a (전영업일 KRX 종가, 권장 event_type)
+      - signal-notify       # trigger_b (전영업일)
       - notify-dispatch     # trigger_b (기존 cron-job.org 잡이 쓰는 event_type)
+      - signal-eod-a        # trigger_a 당일(KIS 종가, 16:05 KST 배치)
+      - signal-eod-b        # trigger_b 당일(KIS, 16:45 KST 배치)
       - trigger_a           # 별칭 허용
       - trigger_b
       - "Signal to Buy"     # cron-job.org 잡 이름을 그대로 쓴 경우도 허용
@@ -24,6 +26,10 @@ on:
         description: "trigger_a | trigger_b"
         required: true
         default: "trigger_a"
+      source:
+        description: "krx(전영업일 종가) | kis(당일 종가 — 15:30 마감 직후)"
+        required: false
+        default: "krx"
       date:
         description: "기준일 YYYYMMDD (생략 시 오늘 — 백필·테스트용)"
         required: false
@@ -43,7 +49,7 @@ on:
 # 는 다른 그룹이라 서로 취소하지 않는다. workflow_dispatch는 inputs.stage로, 외부
 # 크론(repository_dispatch)은 event action으로 그룹을 나눈다.
 concurrency:
-  group: track1-${{ github.event.inputs.stage || github.event.action }}
+  group: track1-${{ github.event.inputs.stage || github.event.action }}-${{ github.event.inputs.source || github.event.client_payload.source }}
   cancel-in-progress: true
 
 jobs:
@@ -62,6 +68,9 @@ jobs:
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
       GDRIVE_TOKEN_FILE: token.json
+      KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+      KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+      KIS_ENV: ${{ secrets.KIS_ENV }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -72,17 +81,29 @@ jobs:
         run: echo "${{ secrets.GDRIVE_TOKEN_JSON_B64 }}" | base64 -d > token.json
       # repository_dispatch는 event_type(github.event.action)으로 스테이지를 라우팅한다
       # — 벽시계 기준 판정은 실행 지연 시 스테이지가 뒤바뀌므로 쓰지 않는다.
+      # 스테이지·소스 라우팅. repository_dispatch는 event_type으로, workflow_dispatch는
+      # inputs로 판정한다(벽시계 기준 금지 — 실행 지연 시 스테이지가 뒤바뀐다).
+      #  signal-eod-a → trigger_a --source kis / signal-eod-b → trigger_b --source kis
       - name: Decide stage
         id: stage
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "stage=${{ github.event.inputs.stage }}" >> "$GITHUB_OUTPUT"
+            echo "source=${{ github.event.inputs.source || 'krx' }}" >> "$GITHUB_OUTPUT"
           else
             case "${{ github.event.action }}" in
+              signal-eod-b)
+                echo "stage=trigger_b" >> "$GITHUB_OUTPUT"
+                echo "source=kis" >> "$GITHUB_OUTPUT" ;;
+              signal-eod-a)
+                echo "stage=trigger_a" >> "$GITHUB_OUTPUT"
+                echo "source=kis" >> "$GITHUB_OUTPUT" ;;
               signal-notify|notify-dispatch|trigger_b|"Signal notify")
-                echo "stage=trigger_b" >> "$GITHUB_OUTPUT" ;;
+                echo "stage=trigger_b" >> "$GITHUB_OUTPUT"
+                echo "source=krx" >> "$GITHUB_OUTPUT" ;;
               *)
-                echo "stage=trigger_a" >> "$GITHUB_OUTPUT" ;;
+                echo "stage=trigger_a" >> "$GITHUB_OUTPUT"
+                echo "source=krx" >> "$GITHUB_OUTPUT" ;;
             esac
           fi
       # date/test/basis는 workflow_dispatch 입력 또는 repository_dispatch의
@@ -90,6 +111,7 @@ jobs:
       - name: Run stage
         run: |
           STAGE="${{ steps.stage.outputs.stage }}"
+          SOURCE="${{ steps.stage.outputs.source }}"
           DATE="${{ github.event.inputs.date || github.event.client_payload.date }}"
           TEST="${{ github.event.inputs.test || github.event.client_payload.test }}"
           BASIS="${{ github.event.inputs.basis || github.event.client_payload.basis }}"
@@ -102,6 +124,9 @@ jobs:
           fi
           if [ -n "$BASIS" ] && [ "$STAGE" = "trigger_a" ]; then
             ARGS="$ARGS --basis $BASIS"
+          fi
+          if [ "$SOURCE" = "kis" ]; then
+            ARGS="$ARGS --source kis"
           fi
           python "run_${STAGE}.py" $ARGS
       # 트랙3 워치리스트 — 트리거 A 직후 같은 런에서 점검(트리거 A가 방금 쓴 EOD 재사용).

@@ -292,3 +292,24 @@ def test_pre_rows_sorted_by_total_signal():
            "B00002": {"total_signal": 3.9, "sel": {}}}
     rows = run_trigger_b._pre_rows(pre)
     assert rows[0].startswith("• B00002") or "B00002" in rows[0].splitlines()[0]
+
+
+# ───────────────────────────── KIS 당일 모드 체크포인트 탐색
+
+def test_find_checkpoint_same_day_prefers_today(monkeypatch):
+    tds = TODAY.strftime("%Y%m%d")
+    store = {f"checkpoints/trigger_a_{tds}.json": {"finalists": {}, "date": tds}}
+    monkeypatch.setattr(run_trigger_b.storage, "load_json", lambda p: store.get(p))
+    found = run_trigger_b._find_checkpoint(TODAY, same_day=True)
+    assert found is not None and found[0] == tds
+
+
+def test_find_checkpoint_default_skips_today(monkeypatch):
+    # same_day=False(krx)면 당일 키는 보지 않고 전영업일만 소급
+    tds = TODAY.strftime("%Y%m%d")
+    store = {f"checkpoints/trigger_a_{tds}.json": {"finalists": {}}}
+    monkeypatch.setattr(run_trigger_b.krx, "previous_trading_session",
+                        lambda d: "20260706")
+    monkeypatch.setattr(run_trigger_b.storage, "load_json", lambda p: store.get(p))
+    # 당일만 있고 전영업일 체크포인트는 없음 → None
+    assert run_trigger_b._find_checkpoint(TODAY, same_day=False) is None

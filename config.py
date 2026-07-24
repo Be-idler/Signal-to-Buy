@@ -19,6 +19,15 @@ TELEGRAM_BOT2_TOKEN = os.environ.get("TELEGRAM_BOT2_TOKEN", _TG_TOKEN)
 TELEGRAM_BOT2_CHAT_ID = os.environ.get("TELEGRAM_BOT2_CHAT_ID", _TG_CHAT)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+# 한국투자증권(KIS) OpenAPI — 당일 종가 수집(하이브리드). 시세 전용, 주문 미사용.
+# ⚠️ 키에 주문 권한이 붙으므로 예수금 0원 전용 실전 계좌 권장(코드는 주문 미호출).
+KIS_APP_KEY = os.environ.get("KIS_APP_KEY", "")
+KIS_APP_SECRET = os.environ.get("KIS_APP_SECRET", "")
+KIS_ENV = os.environ.get("KIS_ENV", "prod")          # prod(실전) | paper(모의)
+# 프로브 실측(개인 실전 조회 상한 ~2~3 req/s) 기반 기본값 — 유량초과 재시도로 보완.
+KIS_MAX_WORKERS = int(os.environ.get("KIS_MAX_WORKERS", "3"))
+KIS_RATE_LIMIT = float(os.environ.get("KIS_RATE_LIMIT", "2.5"))   # 초당 최대 요청
 # 관세청 수출입실적 (data.go.kr — 계정 인증키. 두 변수는 같은 값이어도 무방)
 CUSTOMS_COUNTRY_API_KEY = os.environ.get("CUSTOMS_COUNTRY_API_KEY", "")
 CUSTOMS_REGION_API_KEY = os.environ.get("CUSTOMS_REGION_API_KEY", "")

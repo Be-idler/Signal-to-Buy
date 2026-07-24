@@ -367,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
                 "name": entry.get("name"), "rsi": entry.get("rsi"),
                 "total_signal": q.get("total_signal"),
                 "A_quant": q.get("A_quant"), "D_quant": q.get("D_quant"),
+                "section_totals": q.get("section_totals_signal"),
                 "market_context": entry.get("market_context"),
                 "news": (pre_docs.get(t, {}).get("news") or [])[:2],
                 "sel": {k: m.get(k) for k in _SEL_KEYS},

@@ -179,20 +179,41 @@ def _quant_sel_reason(sel: dict, a_q: float | None, d_q: float | None) -> str:
     return f"{core} — {tail}{gate_txt}"
 
 
-def _format_pre_row(ticker: str, info: dict, scored_item: dict | None = None) -> str:
-    """1차 정량통과 종목 행 — 종목명·RSI·총점 / 하락사유 / 선정사유.
+# 단도 섹션 라벨 (v1 §4) — 일일 메시지 항목별 점수 표기용
+_SECTION_LABELS = {"A": "하방보호", "B": "수익성", "C": "저평가",
+                   "D": "밸류트랩배제", "E": "주주환원", "F": "경영진·내부자"}
 
-    LLM 그라운딩된 종목(시그널 통과분)은 LLM 사유·재배점 총점을, 나머지는
-    정량·결정론 사유와 재정규화 총점을 쓴다.
+
+def _section_lines(totals: dict | None) -> list[str]:
+    """섹션별 점수 줄 — 'A 하방보호 3.9점' 형태. totals: {A..F: float}."""
+    if not totals:
+        return []
+    out = []
+    for k in "ABCDEF":
+        v = totals.get(k)
+        if v is not None:
+            out.append(f"  {k} {_SECTION_LABELS[k]} {v:.1f}점")
+    return out
+
+
+def _format_pre_row(ticker: str, info: dict, scored_item: dict | None = None) -> str:
+    """1차 정량통과 종목 행 — 종목명·RSI·총점 / 섹션별 점수 / 하락사유 / 선정사유.
+
+    LLM 그라운딩된 종목(시그널 통과분)은 LLM 사유·재배점 총점·전체 섹션 점수를,
+    나머지는 정량·결정론 사유와 재정규화 총점·재정규화 섹션 점수를 쓴다.
     """
     label = f"{info.get('name') or ticker} ({ticker})"
     grounded = bool(scored_item and scored_item.get("grounded"))
     if grounded:
         total, tag = scored_item["decision"]["total"], "LLM 재배점"
+        sect = {k: scored_item["result"]["sections"][k]["total"]
+                for k in "ABCDEF" if k in scored_item["result"]["sections"]}
     else:
         total, tag = info.get("total_signal"), "정량"
+        sect = info.get("section_totals")
     total_txt = f"{total:.2f}" if total is not None else "?"
     lines = [f"• {label} — RSI {info.get('rsi')} · 총점 {total_txt} ({tag})"]
+    lines += _section_lines(sect)
     if grounded:
         qual, entry = scored_item["qual"], scored_item["entry"]
         lines += [f"  {ln}" for ln in _drop_lines(qual, entry, entry["metrics"])]

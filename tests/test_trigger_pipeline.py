@@ -239,17 +239,33 @@ def test_quant_sel_reason_flags_weak_trend():
     assert "⚠️ 추세 지표 일부 약화" in line
 
 
+def test_section_lines_labels_and_order():
+    lines = run_trigger_b._section_lines(
+        {"A": 3.9, "B": 3.0, "C": 4.2, "D": 3.1, "E": 2.6, "F": 2.8})
+    assert lines[0] == "  A 하방보호 3.9점"
+    assert lines[2] == "  C 저평가 4.2점"
+    assert lines[5] == "  F 경영진·내부자 2.8점"
+    assert run_trigger_b._section_lines(None) == []
+
+
 def test_format_pre_row_quant_only():
     info = {"name": "부스타", "rsi": 19.52, "total_signal": 3.4,
             "A_quant": 3.9, "D_quant": 3.0,
+            "section_totals": {"A": 3.9, "B": 3.0, "C": 3.5,
+                               "D": 3.0, "E": 2.5, "F": 3.0},
             "market_context": {"beta": 1.0, "stock_dd": -0.10, "market_dd": -0.08},
             "news": [{"title": "부스타 신제품 출시", "date": "2026-07-20"}],
             "sel": {"revenue_cagr_5y": 0.05, "op_income_slope": 0.03,
                     "fcf_negative_years": 0, "drawdown_52w": -0.35}}
     row = run_trigger_b._format_pre_row("008470", info)
-    assert row.splitlines()[0] == "• 부스타 (008470) — RSI 19.52 · 총점 3.40 (정량)"
+    ls = row.splitlines()
+    assert ls[0] == "• 부스타 (008470) — RSI 19.52 · 총점 3.40 (정량)"
+    assert ls[1] == "  A 하방보호 3.9점"       # 섹션 점수가 첫 줄 바로 아래
+    assert "F 경영진·내부자 3.0점" in row
     assert "하락사유:" in row and "선정사유:" in row
     assert "참고 뉴스: 부스타 신제품 출시 (2026-07-20)" in row
+    # 섹션 점수 줄이 하락사유보다 먼저 나온다
+    assert row.index("하방보호") < row.index("하락사유")
 
 
 def test_format_pre_row_grounded_uses_llm():
@@ -257,11 +273,16 @@ def test_format_pre_row_grounded_uses_llm():
             "A_quant": 4.0, "D_quant": 3.5, "sel": {}}
     scored_item = {"grounded": True,
                    "decision": {"total": 3.11},
+                   "result": {"sections": {
+                       "A": {"total": 4.0}, "B": {"total": 3.2},
+                       "C": {"total": 3.5}, "D": {"total": 3.5},
+                       "E": {"total": 2.8}, "F": {"total": 3.0}}},
                    "qual": {"drop_reason": "벤처투자 회수시장 위축(일회성)",
                             "selection_reason": "운용자산 성장 지속"},
                    "entry": {"metrics": {}, "market_context": {}}}
     row = run_trigger_b._format_pre_row("027360", info, scored_item)
     assert "총점 3.11 (LLM 재배점)" in row
+    assert "A 하방보호 4.0점" in row           # LLM 재배점 후 섹션 점수 표기
     assert "하락사유: 벤처투자 회수시장 위축(일회성)" in row
     assert "선정사유: 운용자산 성장 지속" in row
 

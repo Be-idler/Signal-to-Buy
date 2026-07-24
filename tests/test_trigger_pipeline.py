@@ -51,11 +51,13 @@ def test_resolve_basis_holiday_walks_back(monkeypatch):
     assert basis == "20260706" and "휴장" in note and "직전 거래일 20260706" in note
 
 
-def test_resolve_basis_skips_when_already_analyzed(monkeypatch):
+def test_resolve_basis_returns_basis_even_if_analyzed(monkeypatch):
+    # 아카이빙-우선 설계: _resolve_basis는 이미 분석된 날도 basis를 돌려준다
+    # (KRX 공식 EOD 적재는 항상 수행, 분석 중복 스킵은 main에서 처리).
     monkeypatch.setattr(run_trigger_a.krx, "is_trading_day", lambda d: d == "20260707")
     monkeypatch.setattr(run_trigger_a.storage, "load_json", lambda p: {"date": "20260707"})
     basis, note = run_trigger_a._resolve_basis(TODAY, is_backfill=False)
-    assert basis is None and "이미 분석됨" in note
+    assert basis == "20260707"
 
 
 def test_resolve_basis_none_when_no_data(monkeypatch):

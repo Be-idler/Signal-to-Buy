@@ -195,9 +195,10 @@ def _resolve_basis(today: dt.date, is_backfill: bool) -> tuple[str | None, str]:
               f"재확인(그레이스 {EOD_GRACE_MINUTES}분)")
         time.sleep(EOD_POLL_SECONDS)
 
-    if storage.load_json(f"checkpoints/trigger_a_{basis}.json") is not None:
-        return None, f"{note} 이미 분석됨"
-    return basis, f"{note} 기준 분석"
+    # '이미 분석됨' 판정은 여기서 하지 않는다 — KRX 경로는 KIS가 당일 저녁에
+    # 먼저 분석했더라도 다음날 아침 **공식 KRX 전종목 EOD를 아카이브**해야 하므로,
+    # 시세 수집·적재까지는 항상 수행하고 분석(스코어링·발송)만 main()에서 중복 스킵한다.
+    return basis, f"{note} 기준"
 
 
 def _load_kis_eod(today: dt.date, date_str: str
@@ -296,6 +297,17 @@ def main(argv: list[str] | None = None) -> int:
                                              end_date=today)
         snap_df = pd.DataFrame(snapshots[date_str])
         storage.upload_parquet(snap_df, f"prices/eod_{date_str}.parquet")
+
+        # 아카이브-후-중복스킵: KRX 경로에서 해당일이 이미 분석됐으면(KIS가 당일
+        # 저녁에 먼저 처리) 공식 KRX 전종목 EOD 적재까지만 하고 분석은 건너뛴다.
+        # KIS 경로는 _load_kis_eod가 이미 중복을 걸러 여기 오지 않는다.
+        if (args.source != "kis"
+                and storage.load_json(f"checkpoints/trigger_a_{date_str}.json")
+                is not None):
+            print(f"[trigger_a] {date_str} 이미 분석됨 — KRX 공식 EOD 아카이브만 수행, 분석 스킵")
+            notify.send_heartbeat(notify.header_heartbeat(run_date)
+                                  + f"\nA: {note} · KRX EOD 아카이브(이미 분석됨, 분석 스킵)")
+            return 0
 
         # ② RSI<30 1차 필터 + 유동성/품질 필터 (v1 L1: 보통주·거래대금·정지 제외)
         oversold = rsi.filter_oversold(eod, config.RSI_PERIOD, config.RSI_THRESHOLD)

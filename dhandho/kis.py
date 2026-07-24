@@ -87,7 +87,8 @@ def _inquire(token: str, ticker: str, limiter: _RateLimiter,
     headers = {"authorization": f"Bearer {token}",
                "appkey": config.KIS_APP_KEY, "appsecret": config.KIS_APP_SECRET,
                "tr_id": "FHKST01010100", "custtype": "P"}
-    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}
+    # 시장구분 J=KRX(확정 종가). NXT(NX)·통합(UN)은 애프터마켓 미확정가라 금지.
+    params = {"FID_COND_MRKT_DIV_CODE": config.KIS_MARKET_DIV, "FID_INPUT_ISCD": ticker}
     for attempt in range(retries):
         limiter.wait()
         try:

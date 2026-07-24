@@ -1,123 +1,114 @@
-"""KIS(한국투자증권) API 0단계 프로브 — 시세 배치 도입 전 실측용(주문 미호출).
+"""KIS 처리량 정밀 프로브 — 동시성별 유효 req/s·유량초과(EGW00201) 실측.
 
-검증 항목(모두 시세 조회 전용, 계좌·주문 절대 안 건드림):
-  1) 접근토큰 발급 성공 여부 = GitHub Actions 러너(해외 IP) 차단 여부
-  2) inquire-price(현재가=마감 후 확정 종가) 응답 형식·필드 확인
-  3) 순차 호출 처리량(req/s) 측정 — 전 종목(~2,700) 수집 소요시간 추정
-
-비밀키는 절대 출력하지 않는다(환경변수로만 읽고, 실패 시 상태코드·요약만 표기).
+목적: 전 종목(~2,000 보통주) 당일 종가를 30분 창 안에 안전히 수집할
+최적 동시 스레드 수와 초당 상한을 찾는다. 시세 조회 전용(주문 미호출),
+비밀키는 출력하지 않는다.
 """
 from __future__ import annotations
 
-import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
 APP_KEY = os.environ.get("KIS_APP_KEY", "")
 APP_SECRET = os.environ.get("KIS_APP_SECRET", "")
 ENV = os.environ.get("KIS_ENV", "prod").strip().lower()
-
-# 실전/모의 도메인 — 시세는 실전 도메인에서만 정상 유량. paper는 참고용.
 BASE = ("https://openapivts.koreainvestment.com:29443" if ENV in ("paper", "vts")
         else "https://openapi.koreainvestment.com:9443")
 
-# 프로브용 소수 종목 (삼성전자·SK하이닉스·NAVER·카카오·현대차)
-TEST_TICKERS = ["005930", "000660", "035420", "035720", "005380"]
-
-
-def _fail(msg: str) -> int:
-    print(f"❌ {msg}")
-    return 1
+# 조회 반복용 대표 종목(멱등 — 반복 조회 무해). 실제 배치는 전 종목.
+TICKERS = ["005930", "000660", "035420", "035720", "005380",
+           "051910", "006400", "005490", "000270", "012330"]
 
 
 def get_token() -> str | None:
-    """접근토큰 발급 — 성공하면 해외 IP 차단 아님. 실패 시 원인 요약."""
     if not APP_KEY or not APP_SECRET:
-        _fail("KIS_APP_KEY/KIS_APP_SECRET 환경변수 없음 — Secrets 등록 확인")
+        print("❌ KIS_APP_KEY/SECRET 없음")
         return None
-    t0 = time.time()
     try:
         r = requests.post(f"{BASE}/oauth2/tokenP",
                           json={"grant_type": "client_credentials",
                                 "appkey": APP_KEY, "appsecret": APP_SECRET},
                           timeout=(10, 30))
     except requests.RequestException as e:
-        _fail(f"토큰 요청 네트워크 실패(차단·타임아웃 의심): {type(e).__name__}: {e}")
+        print(f"❌ 토큰 네트워크 실패: {type(e).__name__}: {e}")
         return None
-    dt = time.time() - t0
     if r.status_code != 200:
-        # 본문에 키가 담기지 않음 — 상태코드·에러코드만 노출
-        body = r.text[:300]
-        _fail(f"토큰 발급 실패 HTTP {r.status_code} ({dt:.1f}s): {body}")
-        if r.status_code in (401, 403):
-            print("   → 401/403: 앱키/시크릿 불일치 또는 IP 접근제한 가능성")
+        print(f"❌ 토큰 실패 HTTP {r.status_code}: {r.text[:200]}")
         return None
-    data = r.json()
-    tok = data.get("access_token")
-    print(f"✅ 토큰 발급 성공 ({dt:.1f}s) — 해외 IP 차단 아님, "
-          f"만료 {data.get('expires_in')}초(~24h)")
-    return tok
+    print(f"✅ 토큰 발급 성공 (만료 {r.json().get('expires_in')}초)")
+    return r.json().get("access_token")
 
 
-def inquire_price(token: str, ticker: str) -> dict | None:
-    """현재가(마감 후 = 확정 종가) 단건 조회."""
-    r = requests.get(
-        f"{BASE}/uapi/domestic-stock/v1/quotations/inquire-price",
-        headers={"authorization": f"Bearer {token}",
-                 "appkey": APP_KEY, "appsecret": APP_SECRET,
-                 "tr_id": "FHKST01010100", "custtype": "P"},
-        params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
-        timeout=(10, 30))
-    if r.status_code != 200:
-        print(f"   {ticker} HTTP {r.status_code}: {r.text[:150]}")
-        return None
-    data = r.json()
-    if data.get("rt_cd") != "0":
-        print(f"   {ticker} rt_cd={data.get('rt_cd')} "
-              f"msg_cd={data.get('msg_cd')} {data.get('msg1')}")
-        return None
-    return data.get("output") or {}
+def _one(token: str, ticker: str) -> tuple[bool, bool]:
+    """(성공, 유량초과) 반환. 유량초과(EGW00201)와 기타 오류를 구분."""
+    try:
+        r = requests.get(
+            f"{BASE}/uapi/domestic-stock/v1/quotations/inquire-price",
+            headers={"authorization": f"Bearer {token}",
+                     "appkey": APP_KEY, "appsecret": APP_SECRET,
+                     "tr_id": "FHKST01010100", "custtype": "P"},
+            params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+            timeout=(10, 30))
+    except requests.RequestException:
+        return False, False
+    if r.status_code == 200 and r.json().get("rt_cd") == "0":
+        return True, False
+    rate = "EGW00201" in r.text        # 초당 거래건수 초과
+    return False, rate
+
+
+def measure(token: str, workers: int, total: int = 40) -> dict:
+    """동시성 workers로 total건 요청 — 유효 req/s·유량초과율 측정."""
+    t0 = time.time()
+    ok = over = err = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_one, token, TICKERS[i % len(TICKERS)])
+                for i in range(total)]
+        for f in futs:
+            success, rate = f.result()
+            if success:
+                ok += 1
+            elif rate:
+                over += 1
+            else:
+                err += 1
+    elapsed = time.time() - t0
+    rps = ok / elapsed if elapsed else 0
+    return {"workers": workers, "ok": ok, "over": over, "err": err,
+            "elapsed": elapsed, "rps": rps}
 
 
 def main() -> int:
-    print(f"[kis_probe] ENV={ENV} BASE={BASE}")
+    print(f"[kis_probe v2] ENV={ENV}")
     token = get_token()
     if not token:
         return 1
 
-    # 2) 응답 형식 확인 — 대표 종목 몇 개
-    print("\n── 응답 형식 확인 (현재가=확정 종가) ──")
-    ok = 0
-    for t in TEST_TICKERS:
-        out = inquire_price(token, t)
-        if out:
-            ok += 1
-            print(f"   {t} {out.get('hts_kor_isnm')}: 종가 "
-                  f"{out.get('stck_prpr')}원, 전일대비 {out.get('prdy_ctrt')}%, "
-                  f"거래량 {out.get('acml_vol')}, 시총 {out.get('hts_avls')}(억)")
-        time.sleep(0.1)
-    if not ok:
-        return _fail("현재가 조회 전건 실패 — tr_id·파라미터·권한 확인 필요")
-    print(f"   → {ok}/{len(TEST_TICKERS)}종목 정상")
+    print("\n── 동시성별 처리량·유량초과 실측 (각 40건) ──")
+    print("workers | 성공 | 유량초과 | 기타 | 경과   | 유효 req/s")
+    results = []
+    for w in (1, 2, 3, 5, 8, 12):
+        r = measure(token, w)
+        results.append(r)
+        print(f"  {w:>4}  |  {r['ok']:>2}  |   {r['over']:>2}    | {r['err']:>2}  "
+              f"| {r['elapsed']:>5.1f}s | {r['rps']:>5.1f}")
+        time.sleep(2)               # 레벨 간 유량 리셋 여유
 
-    # 3) 처리량 측정 — 30회 순차 호출(초당 유량·차단 여부 실측)
-    print("\n── 처리량 측정 (30회 순차) ──")
-    n, t0, errs = 30, time.time(), 0
-    for i in range(n):
-        out = inquire_price(token, TEST_TICKERS[i % len(TEST_TICKERS)])
-        if out is None:
-            errs += 1
-    elapsed = time.time() - t0
-    rps = n / elapsed if elapsed else 0
-    print(f"   {n}회 / {elapsed:.1f}s = {rps:.1f} req/s (실패 {errs})")
-    est = 2700 / rps if rps else float("inf")
-    print(f"   → 전 종목(~2,700) 추정 소요: {est:.0f}s (~{est/60:.1f}분)")
-    if errs > n * 0.2:
-        print("   ⚠️ 실패율 높음 — 유량 초과(EGW00201)·간헐 차단 가능, 간격 조정 필요")
+    # 유량초과 0(또는 극소)인 가장 높은 처리량 선택
+    safe = [r for r in results if r["over"] == 0 and r["err"] == 0]
+    best = max(safe or results, key=lambda r: r["rps"])
+    print(f"\n권장 동시성: {best['workers']} 스레드 "
+          f"(유효 {best['rps']:.1f} req/s, 유량초과 {best['over']})")
+    for target in (2000, 2700):
+        est = target / best["rps"] if best["rps"] else float("inf")
+        print(f"   {target}종목 추정: {est:.0f}s (~{est/60:.1f}분)")
+    if best["rps"] >= 2000 / (28 * 60):     # 28분 내 2000종목 = ~1.2 req/s
+        print("   ✅ 30분 배치 창 내 수집 가능")
     else:
-        print("   ✅ 처리량 안정 — 30분 배치 창 내 전 종목 수집 가능")
+        print("   ⚠️ 처리량 부족 — 대상 축소·재시도 설계 필요")
     return 0
 
 

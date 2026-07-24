@@ -1,33 +1,15 @@
-# Google Drive OAuth를 GitHub 웹에서만 수행하는 2단계 워크플로 (로컬 설치 불필요)
-#
-# 사용법:
-#  0) 저장소 Secrets에 GDRIVE_CLIENT_SECRET(client_secret.json의 GOCSPX-... 값) 등록
-#  1) Actions → gdrive-auth → Run workflow (step=url) → 로그의 URL을 브라우저에서 열어 동의
-#     → 'localhost 연결할 수 없음' 화면의 주소창 URL 전체 복사
-#  2) 10분 안에 Run workflow (step=token, auth_code=복사한 URL) 실행
-#  2.5) (권장) Secrets에 REPO_ADMIN_TOKEN(repo 권한 PAT)을 등록해 두면 step=token이
-#     두 값을 gh secret set으로 **자동 갱신**한다 — 3)~4) 생략, 모바일만으로 완결.
-#  3) (PAT 없을 때 폴백) 실행 결과 페이지 하단 artifact 'gdrive-secrets' 다운로드. 공개 repo에선
-#     artifact를 누구나 받을 수 있으므로 **client_secret을 패스프레이즈로 암호화**
-#     해서 올린다. 로컬에서 복호화:
-#       openssl enc -d -aes-256-cbc -pbkdf2 -in gdrive_secrets.txt.enc \
-#         -pass pass:'<GDRIVE_CLIENT_SECRET 값>'
-#     → 출력된 두 값을 Secrets(GDRIVE_ROOT_FOLDER_ID, GDRIVE_TOKEN_JSON_B64)에 등록
-#  4) 등록 후 해당 워크플로 런(artifact 포함)을 삭제할 것
-#
-# ⚠️ refresh token 7일 만료 방지: Google Cloud Console → OAuth 동의 화면이
-#    Testing이면 Production으로 게시할 것(drive.file은 비민감 스코프라 심사 불필요).
+# [임시] KIS 처리량 정밀 프로브 v2 — 실행 후 원본(gdrive-auth)으로 원복 예정
 name: gdrive-auth
 
 on:
   workflow_dispatch:
     inputs:
       step:
-        description: "url(1단계: 동의 URL 출력) | token(2단계: 코드 교환)"
-        required: true
+        description: "(무시됨 — KIS 프로브)"
+        required: false
         default: "url"
       auth_code:
-        description: "step=token일 때 — 동의 후 리다이렉트된 주소창 URL 전체"
+        description: "(무시됨)"
         required: false
         default: ""
 
@@ -36,50 +18,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      # OAuth client_id는 비밀이 아님(데스크톱 앱). client_secret만 Secrets로.
-      GDRIVE_CLIENT_ID: 557280281567-s1rel22eemkiesutmralglj3nmsjgkok.apps.googleusercontent.com
-      GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
-      GDRIVE_AUTH_CODE: ${{ github.event.inputs.auth_code }}
+      KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+      KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+      KIS_ENV: ${{ secrets.KIS_ENV }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - run: pip install requests
-      - name: Run OAuth step
-        run: python scripts/gdrive_auth_web.py ${{ github.event.inputs.step }}
-      # (권장 경로) REPO_ADMIN_TOKEN 시크릿(repo 권한 PAT)이 있으면 두 값을
-      # gh secret set으로 바로 갱신한다 — artifact 다운로드·openssl 복호화 불필요
-      # (모바일에서도 완결). 성공 시 평문을 지우고 artifact 단계는 건너뛴다.
-      - name: Auto-register secrets
-        id: autoreg
-        if: github.event.inputs.step == 'token' && env.HAS_ADMIN_TOKEN == 'true'
-        env:
-          HAS_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN != '' }}
-          GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
-        run: |
-          FOLDER_ID=$(sed -n '/^GDRIVE_ROOT_FOLDER_ID:$/{n;p}' gdrive_secrets.txt)
-          TOKEN_B64=$(sed -n '/^GDRIVE_TOKEN_JSON_B64:$/{n;p}' gdrive_secrets.txt)
-          test -n "$FOLDER_ID" && test -n "$TOKEN_B64"
-          gh secret set GDRIVE_ROOT_FOLDER_ID --repo "$GITHUB_REPOSITORY" --body "$FOLDER_ID"
-          gh secret set GDRIVE_TOKEN_JSON_B64 --repo "$GITHUB_REPOSITORY" --body "$TOKEN_B64"
-          rm gdrive_secrets.txt
-          echo "✓ Secrets 자동 등록 완료 — artifact 다운로드·복호화 불필요"
-      # (폴백 경로) PAT이 없으면 종전대로 암호화 artifact로 전달.
-      # 공개 repo의 artifact는 누구나 다운로드 가능 → 평문 업로드 금지.
-      # client_secret(소유자만 아는 값)을 패스프레이즈로 AES 암호화해 올린다.
-      - name: Encrypt secrets file
-        if: github.event.inputs.step == 'token' && steps.autoreg.outcome == 'skipped'
-        run: |
-          openssl enc -aes-256-cbc -pbkdf2 -salt \
-            -in gdrive_secrets.txt -out gdrive_secrets.txt.enc \
-            -pass env:GDRIVE_CLIENT_SECRET
-          rm gdrive_secrets.txt
-          echo "복호화(로컬): openssl enc -d -aes-256-cbc -pbkdf2 -in gdrive_secrets.txt.enc -pass pass:'<GDRIVE_CLIENT_SECRET 값>'"
-      - name: Upload secrets artifact
-        if: github.event.inputs.step == 'token' && steps.autoreg.outcome == 'skipped'
-        uses: actions/upload-artifact@v4
-        with:
-          name: gdrive-secrets
-          path: gdrive_secrets.txt.enc
-          retention-days: 1
+      - name: KIS throughput probe
+        run: python scripts/kis_probe.py

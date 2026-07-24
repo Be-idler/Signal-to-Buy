@@ -283,6 +283,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[trigger_a] near-miss {n['ticker']} {n['name']} "
                   f"A {n['A_quant']} / D {n['D_quant']} (기준 각 3.0)")
 
+        # 시장 요인 분해 — 1차 통과 종목 전체에 산출(트리거 B가 '하락사유 미확보'
+        # 종목에 지수 동반 하락 여부를 결정론으로 쓸 수 있도록). 전 종목 시총합
+        # 프록시, 60일치 EOD가 이미 메모리에 있어 추가 API 비용 없음.
+        if pre_finalists:
+            mdates, mlevels = market.build_series(snapshots)
+            mrets = market.returns(mlevels)
+            mkt_dd = market.drawdown(mlevels)
+            for t in pre_finalists:
+                stock_dd = market.drawdown(eod.get(t, {}).get("closes"))
+                srets = market.returns(market.stock_level_series(snapshots, t, mdates))
+                b = market.beta(srets, mrets)
+                ctx = market.assess_decline(stock_dd, mkt_dd, b,
+                                            window_label="최근 60거래일")
+                # β·낙폭 원자료도 보존 — 트리거 B가 시장 기여도를 항상 표기할 수 있도록
+                ctx.update({"beta": b, "stock_dd": stock_dd, "market_dd": mkt_dd})
+                pre_finalists[t]["market_context"] = ctx
+
         # ④' 2차 정량 필터 (§13.4 개정) — A~F 전 섹션(LLM 전용 항목 제외·재정규화)
         # 으로 매수 시그널을 직접 도출한다. E1·F2 결정론 입력을 위해 배당·자기
         # 주식·내부자 소유보고만 먼저 가져온다 — 정기보고서 본문 등 무거운 수집은
@@ -306,7 +323,16 @@ def main(argv: list[str] | None = None) -> int:
                     shareholder = _shareholder_summary(dividend, treasury)
                 except RuntimeError as e:
                     print(f"[trigger_a] delta fetch failed {t}: {e}")
-            pre_docs[t] = {"disclosures": disclosures, "executives": execs}
+            # 뉴스 헤드라인 (tier 3) — 1차 통과 전 종목: 트리거 B 하락사유 참고
+            # + 시그널 통과 시 LLM D2 근거로 재사용(중복 조회 방지). best-effort.
+            news_items: list[dict] = []
+            try:
+                nm = entry.get("name") or t
+                news_items = news.search_news(f"{nm} 주가")
+            except Exception as e:                # noqa: BLE001
+                print(f"[trigger_a] 뉴스 검색 실패(무시) {t}: {e}")
+            pre_docs[t] = {"disclosures": disclosures, "executives": execs,
+                           "news": news_items}
             quant_signal = frameworks.score_dhandho_quant_signal(
                 entry["metrics"], peers=peers, disclosures=disclosures,
                 shareholder=shareholder, insider=insider)
@@ -329,25 +355,27 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[trigger_a] signal near-miss {n['ticker']} {n['name']} "
                   f"total_signal {n['total_signal']} (기준 {config.SCORE_QUANT_SIGNAL_MIN})")
 
-        # 시장 요인 분해: 급락이 지수 동반인지(전 종목 시총합 프록시, 추가 API 없음).
-        # 60일치 EOD가 이미 메모리에 있어 종목별 베타까지 비용 없이 산출.
-        if finalists:
-            mdates, mlevels = market.build_series(snapshots)
-            mrets = market.returns(mlevels)
-            mkt_dd = market.drawdown(mlevels)
-            for t in finalists:
-                stock_dd = market.drawdown(eod.get(t, {}).get("closes"))
-                srets = market.returns(market.stock_level_series(snapshots, t, mdates))
-                b = market.beta(srets, mrets)
-                ctx = market.assess_decline(stock_dd, mkt_dd, b,
-                                            window_label="최근 60거래일")
-                # β·낙폭 원자료도 보존 — 트리거 B가 시장 기여도를 항상 표기할 수 있도록
-                ctx.update({"beta": b, "stock_dd": stock_dd, "market_dd": mkt_dd})
-                finalists[t]["market_context"] = ctx
+        # 1차 통과 종목 요약 — 트리거 B 일일 메시지의 본문 재료(종목명·RSI·재정규화
+        # 총점·시장요인·뉴스·구조훼손 판정용 지표 스냅샷). 시그널 미달 종목도 포함.
+        pre_summary: dict[str, dict] = {}
+        _SEL_KEYS = ("revenue_cagr_5y", "op_income_slope", "fcf_negative_years",
+                     "net_cash_to_mktcap", "interest_coverage", "drawdown_52w")
+        for t, entry in pre_finalists.items():
+            q = signal_scored.get(t) or {}
+            m = entry["metrics"]
+            pre_summary[t] = {
+                "name": entry.get("name"), "rsi": entry.get("rsi"),
+                "total_signal": q.get("total_signal"),
+                "A_quant": q.get("A_quant"), "D_quant": q.get("D_quant"),
+                "market_context": entry.get("market_context"),
+                "news": (pre_docs.get(t, {}).get("news") or [])[:2],
+                "sel": {k: m.get(k) for k in _SEL_KEYS},
+            }
 
         checkpoint = {"date": date_str, "finalists": {}, "batch_id": None,
                       "fin_basis": fin_basis, "oversold_count": len(oversold),
                       "pre_finalist_count": len(pre_finalists),
+                      "pre_finalists": _jsonable(pre_summary),
                       "near_misses": _jsonable(near_misses),
                       "signal_near_misses": _jsonable(signal_near_misses),
                       "peers_size": {k: len(v) for k, v in peers.items()}}
@@ -385,13 +413,9 @@ def main(argv: list[str] | None = None) -> int:
                         except RuntimeError as e:
                             print(f"[trigger_a] disclosure body failed {t} "
                                   f"{d0.get('rcept_no')}: {e}")
-                # 뉴스 헤드라인 (tier 3) — D2 급락 사유 보조 근거. best-effort.
-                news_items: list[dict] = []
+                # 뉴스 헤드라인 (tier 3) — ④'에서 이미 수집(재사용, 중복 조회 없음)
+                news_items: list[dict] = pre_docs[t].get("news") or []
                 nm = (eod.get(t) or {}).get("name") or t
-                try:
-                    news_items = news.search_news(f"{nm} 주가")
-                except Exception as e:                # noqa: BLE001
-                    print(f"[trigger_a] 뉴스 검색 실패(무시) {t}: {e}")
                 trend_note = None
                 try:
                     tr = trends.search_trend(nm)

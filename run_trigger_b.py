@@ -17,7 +17,6 @@ import sys
 import time
 import traceback
 
-import config
 from dhandho import frameworks, gate, krx, ledger, llm, notify, storage
 
 # 배치 미완료 시 최대 대기. 트리거 A가 배치를 제출하고(08:05경) 트리거 B가 그
@@ -117,6 +116,109 @@ def _format_buy(ticker: str, entry: dict, decision: dict, result: dict,
     return "\n".join(lines)
 
 
+def _quant_drop_reason(mc: dict, dd: float | None) -> str:
+    """LLM 사유가 없는 종목의 결정론 하락사유 — 52주 낙폭 + 지수 동반 여부.
+
+    사용자 요구: "하락 사유를 찾을 수 없다면 지수 하락폭을 찾아서 그 영향인지"
+    → β·60거래일 낙폭으로 시장 기여도를 계산해 시장 요인/종목 고유를 판별한다.
+    """
+    parts = []
+    if dd is not None:
+        parts.append(f"52주 고점 대비 {dd:+.0%}")
+    b = mc.get("beta")
+    sdd, mdd = mc.get("stock_dd"), mc.get("market_dd")
+    if sdd is not None and mdd is not None and sdd < 0:
+        bb = b if (b is not None and b > 0) else 1.0
+        beta_txt = f"β {b:.2f}" if b is not None else "β≈1 가정"
+        share = max(0.0, min(bb * mdd / sdd, 1.0)) if mdd < 0 else 0.0
+        if share >= 0.5:
+            parts.append(f"최근 60거래일 지수 {mdd:+.1%} 하락 동반 — "
+                         f"시장 요인이 주된 배경(기여 약 {share:.0%}, {beta_txt})")
+        elif mdd < 0:
+            parts.append(f"최근 60거래일 종목 {sdd:+.1%} vs 지수 {mdd:+.1%} — "
+                         f"종목 고유 요인 우세(시장 기여 약 {share:.0%})")
+        else:
+            parts.append(f"최근 60거래일 종목 {sdd:+.1%} vs 지수 {mdd:+.1%} — "
+                         f"지수와 무관한 종목 고유 하락")
+    return " · ".join(parts) or "하락사유 미확보"
+
+
+def _quant_sel_reason(sel: dict, a_q: float | None, d_q: float | None) -> str:
+    """정량·결정론 지표만으로 선정사유 구성 — 구조적 실적 악화 여부가 핵심.
+
+    사용자 요구: "구조적인 실적 악화가 아니라는 걸 각종 지표로 찾아서" —
+    매출 CAGR·영업이익 추세·FCF 이력·순현금·이자보상으로 판정한다.
+    """
+    bits = []
+    cagr = sel.get("revenue_cagr_5y")
+    if cagr is not None:
+        bits.append(f"매출 5년 CAGR {cagr:+.0%}")
+    slope = sel.get("op_income_slope")
+    if slope is not None:
+        trend = "상승" if slope > 0.02 else "안정" if slope >= -0.02 else "하락"
+        bits.append(f"영업이익 추세 {trend}")
+    n = sel.get("fcf_negative_years")
+    if n == 0:
+        bits.append("FCF 최근 5년 연속 흑자")
+    elif n:
+        bits.append(f"FCF 적자 {int(n)}년")
+    ncm = sel.get("net_cash_to_mktcap")
+    if ncm is not None and ncm > 0:
+        bits.append(f"순현금/시총 {ncm:.0%}")
+    ic = sel.get("interest_coverage")
+    if ic is not None:
+        bits.append("무차입(이자비용 없음)" if ic > 1e6 else f"이자보상 {ic:.0f}배")
+    structural_ok = ((cagr is None or cagr >= -0.02)
+                     and (slope is None or slope >= -0.02)
+                     and (n is None or n <= 1))
+    tail = ("구조적 실적 악화 신호 없음" if structural_ok
+            else "⚠️ 추세 지표 일부 약화 — 원문 확인 권장")
+    core = ", ".join(bits) if bits else "지표 요약 미확보"
+    gate_txt = (f" (하방 A {a_q:.1f}·안정 D {d_q:.1f})"
+                if a_q is not None and d_q is not None else "")
+    return f"{core} — {tail}{gate_txt}"
+
+
+def _format_pre_row(ticker: str, info: dict, scored_item: dict | None = None) -> str:
+    """1차 정량통과 종목 행 — 종목명·RSI·총점 / 하락사유 / 선정사유.
+
+    LLM 그라운딩된 종목(시그널 통과분)은 LLM 사유·재배점 총점을, 나머지는
+    정량·결정론 사유와 재정규화 총점을 쓴다.
+    """
+    label = f"{info.get('name') or ticker} ({ticker})"
+    grounded = bool(scored_item and scored_item.get("grounded"))
+    if grounded:
+        total, tag = scored_item["decision"]["total"], "LLM 재배점"
+    else:
+        total, tag = info.get("total_signal"), "정량"
+    total_txt = f"{total:.2f}" if total is not None else "?"
+    lines = [f"• {label} — RSI {info.get('rsi')} · 총점 {total_txt} ({tag})"]
+    if grounded:
+        qual, entry = scored_item["qual"], scored_item["entry"]
+        lines += [f"  {ln}" for ln in _drop_lines(qual, entry, entry["metrics"])]
+        select = qual.get("selection_reason")
+        if not select:
+            select = _quant_sel_reason(info.get("sel") or {},
+                                       info.get("A_quant"), info.get("D_quant"))
+        lines.append(f"  선정사유: {select}")
+    else:
+        mc = info.get("market_context") or {}
+        dd = (info.get("sel") or {}).get("drawdown_52w")
+        lines.append(f"  하락사유: {_quant_drop_reason(mc, dd)}")
+        for n0 in (info.get("news") or [])[:1]:
+            date = f" ({n0['date']})" if n0.get("date") else ""
+            lines.append(f"  참고 뉴스: {n0.get('title')}{date}")
+        lines.append(f"  선정사유: {_quant_sel_reason(info.get('sel') or {}, info.get('A_quant'), info.get('D_quant'))}")
+    return "\n".join(lines)
+
+
+def _pre_rows(pre_summary: dict, scored: dict | None = None) -> list[str]:
+    """1차 통과 전 종목 행 — 재정규화 총점 내림차순."""
+    ordered = sorted(pre_summary.items(),
+                     key=lambda kv: -(kv[1].get("total_signal") or 0))
+    return [_format_pre_row(t, info, (scored or {}).get(t)) for t, info in ordered]
+
+
 def _format_digest_row(ticker: str, entry: dict, decision: dict, qual: dict,
                        m: dict, names: dict) -> str:
     """그라운딩 숏리스트 폴백 — 종목명·하락사유·시장요인·선정사유 (v1 §6 확장)."""
@@ -200,28 +302,20 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             date_str, ckpt = found
         finalists: dict = ckpt.get("finalists") or {}
+        # 1차 정량통과 종목 요약(신형 체크포인트) — 일일 메시지 본문의 기본 재료.
+        # 근접(near-miss) 목록은 로그·체크포인트에만 남기고 메시지에선 뺀다(사용자 요구).
+        pre_summary: dict = ckpt.get("pre_finalists") or {}
+        n_oversold = ckpt.get("oversold_count")
+        cand_txt = f" (RSI<30 후보 {n_oversold}종목)" if n_oversold else ""
         if not finalists:
-            n_oversold = ckpt.get("oversold_count")
-            n_pre = ckpt.get("pre_finalist_count")
-            lines = [notify.header_daily(date_str),
-                     "매수 시그널 종목 없음"
-                     + (f" (RSI<30 후보 {n_oversold}종목"
-                        + (f" → 1차정량통과 {n_pre}종목" if n_pre is not None else "")
-                        + ")" if n_oversold else "")]
-            near = ckpt.get("near_misses") or []
-            if near:
-                lines.append("1차 게이트 근접 상위 (하방 A·안정 D 기준 각 3.0):")
-                lines += [f"• {n.get('name') or n['ticker']} ({n['ticker']}) "
-                          f"RSI {n['rsi']} — A {n['A_quant']:.1f} / D {n['D_quant']:.1f}"
-                          for n in near]
-            signal_near = ckpt.get("signal_near_misses") or []
-            if signal_near:
-                lines.append("매수 시그널 근접 상위 (A~F 재정규화 총점 기준 "
-                             f"{config.SCORE_QUANT_SIGNAL_MIN} 미달):")
-                lines += [f"• {n.get('name') or n['ticker']} ({n['ticker']}) "
-                          f"RSI {n['rsi']} — 총점 {n['total_signal']:.2f}"
-                          for n in signal_near]
-            send("\n".join(lines))
+            header = notify.header_daily(date_str)
+            if pre_summary:
+                send("\n\n".join(
+                    [header + f"\n매수 시그널 없음 — 1차 정량통과 "
+                              f"{len(pre_summary)}종목{cand_txt}"]
+                    + _pre_rows(pre_summary)))
+            else:
+                send(header + f"\n1차 정량통과 종목 없음{cand_txt}")
             mark_sent(date_str, ckpt)
             return 0
 
@@ -278,7 +372,13 @@ def main(argv: list[str] | None = None) -> int:
         header = notify.header_daily(date_str) + "\n※ 최종 판단은 사람"
         if buys:
             send("\n\n".join([header] + buys))
-        elif digest_rows:
+        elif pre_summary:
+            # BUY 0건 — 1차 정량통과 전 종목 발송(시그널 통과분은 LLM 사유 포함)
+            send("\n\n".join(
+                [header + f"\n매수 시그널 없음 — 1차 정량통과 "
+                          f"{len(pre_summary)}종목{cand_txt}"]
+                + _pre_rows(pre_summary, scored)))
+        elif digest_rows:                            # 구형 체크포인트 폴백
             send("\n\n".join(
                 [header + "\n(BUY 0건 — 그라운딩 숏리스트 폴백)"] + digest_rows))
         else:
@@ -290,7 +390,9 @@ def main(argv: list[str] | None = None) -> int:
         rows = []
         for ticker, s in scored.items():
             verdict = s["decision"]["verdict"]
-            surfaced = (verdict == "BUY") if buys else (s["grounded"] if digest_rows else False)
+            surfaced = ((verdict == "BUY") if buys
+                        else True if pre_summary          # 1차 통과 전 종목 발송됨
+                        else s["grounded"] if digest_rows else False)
             evidence = [d.get("rcept_no") for d in (s["entry"].get("disclosures") or [])
                         if d.get("rcept_no")]
             rows.append(ledger.build_row(

@@ -2,7 +2,16 @@
 name: gdrive-auth
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      step:
+        description: "(무시됨 — KIS 프로브)"
+        required: false
+        default: "url"
+      auth_code:
+        description: "(무시됨)"
+        required: false
+        default: ""
 
 jobs:
   auth:

@@ -32,8 +32,8 @@ import traceback
 import pandas as pd
 
 import config
-from dhandho import (dart, frameworks, gate, krx, llm, market, metrics, news, notify,
-                     rsi, storage, trade, trends)
+from dhandho import (dart, frameworks, gate, kis, krx, llm, market, metrics, news,
+                     notify, rsi, storage, trade, trends)
 
 # 트랙1은 항상 **전영업일** 데이터로 분석한다 — KRX OpenAPI가 시세를 익영업일
 # 오전 08:00경 발행하기 때문(당일 종가는 그날 안엔 절대 안 나온다). 크론은 월–금
@@ -195,9 +195,61 @@ def _resolve_basis(today: dt.date, is_backfill: bool) -> tuple[str | None, str]:
               f"재확인(그레이스 {EOD_GRACE_MINUTES}분)")
         time.sleep(EOD_POLL_SECONDS)
 
-    if storage.load_json(f"checkpoints/trigger_a_{basis}.json") is not None:
-        return None, f"{note} 이미 분석됨"
-    return basis, f"{note} 기준 분석"
+    # '이미 분석됨' 판정은 여기서 하지 않는다 — KRX 경로는 KIS가 당일 저녁에
+    # 먼저 분석했더라도 다음날 아침 **공식 KRX 전종목 EOD를 아카이브**해야 하므로,
+    # 시세 수집·적재까지는 항상 수행하고 분석(스코어링·발송)만 main()에서 중복 스킵한다.
+    return basis, f"{note} 기준"
+
+
+def _load_kis_eod(today: dt.date, date_str: str
+                  ) -> tuple[str | None, str, dict | None, dict | None]:
+    """당일(KIS) 하이브리드 EOD — KRX 60일 히스토리(전영업일까지)에 KIS 당일
+    종가·시총을 이어붙인다. 반환 (basis|None, note, eod|None, snapshots|None).
+
+    KRX는 익영업일 발행이라 당일 종가가 없다 → 15:30 마감 직후 KIS로 당일 종가를
+    받아 붙이면 '당일 기준' RSI·스코어링이 가능하다. KRX는 히스토리·시총 SSOT 유지.
+    """
+    if today.weekday() >= 5:
+        return None, f"{date_str} 주말 — 당일 배치 대상 아님", None, None
+    if storage.load_json(f"checkpoints/trigger_a_{date_str}.json") is not None:
+        return None, f"당일 {date_str} 이미 분석됨", None, None
+    prev = krx.previous_trading_session(today)          # 전영업일(T-1)
+    if prev is None:
+        return None, "KRX 전영업일 시세 없음(히스토리 확보 불가)", None, None
+    prev_date = dt.date(int(prev[:4]), int(prev[4:6]), int(prev[6:8]))
+    eod, snapshots = krx.get_all_eod(days=config.EOD_LOOKBACK_DAYS, end_date=prev_date)
+
+    # RSI 후보는 보통주만(유동성 필터) → 우선주 등은 당일 종가 수집 생략(호출 절감)
+    tickers = [t for t in eod if krx.is_common_stock(t)]
+    print(f"[trigger_a] KIS 당일 종가 수집 대상 {len(tickers)}종목 "
+          f"(동시성 {config.KIS_MAX_WORKERS}, ~{config.KIS_RATE_LIMIT}/s)")
+    t0 = time.time()
+    kis_rows = kis.fetch_snapshot(tickers)
+    print(f"[trigger_a] KIS 수집 완료 {len(kis_rows)}/{len(tickers)}종목 "
+          f"({time.time() - t0:.0f}s)")
+    if not kis_rows:
+        return None, "KIS 당일 종가 수집 0건(차단·유량·휴장 의심)", None, None
+
+    # 당일 스냅샷 행(이름·시장은 KRX 히스토리로 보완 — KIS 종목명은 비어 옴)
+    today_rows = []
+    for r in kis_rows:
+        base = eod.get(r["ticker"]) or {}
+        today_rows.append({**r, "name": r.get("name") or base.get("name"),
+                           "market": r.get("market") or base.get("market")})
+    snapshots[date_str] = today_rows
+
+    # 히스토리에 당일 종가·거래대금 이어붙이고 당일 시총 갱신
+    kis_by = {r["ticker"]: r for r in today_rows}
+    for t, rec in eod.items():
+        r = kis_by.get(t)
+        if r and r.get("close") is not None:
+            rec["closes"].append(r["close"])
+            rec["values"].append(r.get("value"))
+            rec["mktcap"] = r.get("mktcap")
+            rec["halted"] = False
+        else:
+            rec["halted"] = True           # 당일 종가 결측 = 거래정지/미수집
+    return date_str, f"당일 {date_str} (KIS 종가 + KRX 60일 히스토리)", eod, snapshots
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -205,6 +257,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--date", help="기준일 YYYYMMDD (생략 시 오늘, 지정 시 백필·테스트)")
     ap.add_argument("--basis", help="재무 기준 보고서 강제 (예: 2025_11014) — "
                                     "재수집 중 부분 적재 회피·백테스트용")
+    ap.add_argument("--source", choices=("krx", "kis"), default="krx",
+                    help="krx: 전영업일 종가(익일 발행, 기본) | "
+                         "kis: 당일 종가(15:30 마감 직후 KIS 수집, 하이브리드)")
     args = ap.parse_args(argv)
     today = (dt.datetime.strptime(args.date, "%Y%m%d").date() if args.date
              else krx.kst_today())              # UTC 러너라도 KST 기준일로 앵커
@@ -217,20 +272,42 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[trigger_a] auth preflight failed: {detail}")
             return 1
 
-        # ① 분석 기준일 확정 — 항상 전영업일(당일 종가는 익영업일에야 발행됨)
+        # ① 분석 기준일 확정 + EOD 확보
+        #    krx(기본): 전영업일 종가(익일 발행) / kis: 당일 종가(마감 직후 수집)
         run_date = date_str                       # 실행일(발송·하트비트 표기용)
-        basis, note = _resolve_basis(today, is_backfill=bool(args.date))
-        if basis is None:
-            print(f"[trigger_a] skip — {note}")
-            notify.send_heartbeat(notify.header_heartbeat(run_date) + f"\nA: {note}")
-            return 0
-        print(f"[trigger_a] {note}")
-        if basis != date_str:
-            today = dt.datetime.strptime(basis, "%Y%m%d").date()
-            date_str = basis
-        eod, snapshots = krx.get_all_eod(days=config.EOD_LOOKBACK_DAYS, end_date=today)
+        if args.source == "kis":
+            basis, note, eod, snapshots = _load_kis_eod(today, date_str)
+            if basis is None:
+                print(f"[trigger_a] skip — {note}")
+                notify.send_heartbeat(notify.header_heartbeat(run_date) + f"\nA: {note}")
+                return 0
+            print(f"[trigger_a] {note}")
+            date_str = basis                       # 당일(today 그대로)
+        else:
+            basis, note = _resolve_basis(today, is_backfill=bool(args.date))
+            if basis is None:
+                print(f"[trigger_a] skip — {note}")
+                notify.send_heartbeat(notify.header_heartbeat(run_date) + f"\nA: {note}")
+                return 0
+            print(f"[trigger_a] {note}")
+            if basis != date_str:
+                today = dt.datetime.strptime(basis, "%Y%m%d").date()
+                date_str = basis
+            eod, snapshots = krx.get_all_eod(days=config.EOD_LOOKBACK_DAYS,
+                                             end_date=today)
         snap_df = pd.DataFrame(snapshots[date_str])
         storage.upload_parquet(snap_df, f"prices/eod_{date_str}.parquet")
+
+        # 아카이브-후-중복스킵: KRX 경로에서 해당일이 이미 분석됐으면(KIS가 당일
+        # 저녁에 먼저 처리) 공식 KRX 전종목 EOD 적재까지만 하고 분석은 건너뛴다.
+        # KIS 경로는 _load_kis_eod가 이미 중복을 걸러 여기 오지 않는다.
+        if (args.source != "kis"
+                and storage.load_json(f"checkpoints/trigger_a_{date_str}.json")
+                is not None):
+            print(f"[trigger_a] {date_str} 이미 분석됨 — KRX 공식 EOD 아카이브만 수행, 분석 스킵")
+            notify.send_heartbeat(notify.header_heartbeat(run_date)
+                                  + f"\nA: {note} · KRX EOD 아카이브(이미 분석됨, 분석 스킵)")
+            return 0
 
         # ② RSI<30 1차 필터 + 유동성/품질 필터 (v1 L1: 보통주·거래대금·정지 제외)
         oversold = rsi.filter_oversold(eod, config.RSI_PERIOD, config.RSI_THRESHOLD)

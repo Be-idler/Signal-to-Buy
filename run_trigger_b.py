@@ -254,13 +254,20 @@ def _format_digest_row(ticker: str, entry: dict, decision: dict, qual: dict,
     return "\n".join(lines)
 
 
-def _find_checkpoint(today: dt.date) -> tuple[str, dict] | None:
-    """전영업일부터 거래일 단위로 소급하며 미발송 체크포인트 탐색.
+def _find_checkpoint(today: dt.date, same_day: bool = False
+                     ) -> tuple[str, dict] | None:
+    """미발송 트리거 A 체크포인트 탐색.
 
-    trigger_a와 **동일한 '전영업일' 기준**으로 basis를 잡아 같은 체크포인트를 집는다
-    (연휴로 basis가 며칠 전이어도 정확히 대응). KRX 조회 실패 시 달력 기준 폴백.
+    krx 모드(same_day=False): 전영업일부터 거래일 단위로 소급(익일 발행 종가 기준).
+    kis 모드(same_day=True): **당일(today)** 부터 포함해 소급 — trigger_a가 당일
+    종가로 당일 키(trigger_a_{today})에 저장하기 때문. KRX 조회 실패 시 달력 폴백.
     """
     try:
+        if same_day:                              # 당일 체크포인트 우선
+            tds = today.strftime("%Y%m%d")
+            ckpt = storage.load_json(f"checkpoints/trigger_a_{tds}.json")
+            if ckpt is not None and not ckpt.get("signal_sent"):
+                return tds, ckpt
         anchor = today
         for _ in range(CKPT_LOOKBACK_SESSIONS):
             basis = krx.previous_trading_session(anchor)
@@ -273,7 +280,8 @@ def _find_checkpoint(today: dt.date) -> tuple[str, dict] | None:
         return None
     except Exception as e:                        # noqa: BLE001 — KRX 장애 시 달력 폴백
         print(f"[trigger_b] KRX 조회 실패, 달력 기준 폴백: {e}")
-        for back in range(1, CKPT_LOOKBACK_DAYS + 1):
+        start = 0 if same_day else 1
+        for back in range(start, CKPT_LOOKBACK_DAYS + 1):
             d = (today - dt.timedelta(days=back)).strftime("%Y%m%d")
             ckpt = storage.load_json(f"checkpoints/trigger_a_{d}.json")
             if ckpt is not None and not ckpt.get("signal_sent"):
@@ -286,6 +294,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--date", help="기준일 YYYYMMDD (트리거 A 체크포인트 일자 강제)")
     ap.add_argument("--test", action="store_true",
                     help="테스트 발송 표시(메시지 앞에 🧪 태그)")
+    ap.add_argument("--source", choices=("krx", "kis"), default="krx",
+                    help="kis: 당일 체크포인트(trigger_a --source kis) 소비")
     args = ap.parse_args(argv)
     prefix = "🧪 [테스트 발송]\n" if args.test else ""
 
@@ -313,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[trigger_b] no trigger_a checkpoint for {date_str} — skip")
                 return 0
         else:
-            found = _find_checkpoint(today)
+            found = _find_checkpoint(today, same_day=(args.source == "kis"))
             if found is None:
                 print("[trigger_b] no unsent trigger_a checkpoint "
                       f"(최근 {CKPT_LOOKBACK_SESSIONS}거래일, 휴장일?) — skip")
